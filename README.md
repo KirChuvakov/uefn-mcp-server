@@ -15,12 +15,8 @@ Claude Code  <--stdio-->  MCP Server (mcp_server.py)  <--HTTP-->  Listener (uefn
 ### 1. Enable Python in UEFN
 
 1. Open your project in UEFN
-2. Go to **Project Settings** (Edit > Project Settings)
-3. Search for **Python** and enable **Python Editor Script Plugin**
-4. Enable **Editor Scripting Utilities**
-5. Restart the editor
-6. In **Project Settings**, find **Python** section and enable **Python Developer Mode**
-7. Restart the editor again
+2. Go to **Edit > Project Settings**
+3. Search for **Python** and check the boxes for **Python Editor Script Plugin**, **Editor Scripting Utilities**, and **Python Developer Mode**
 
 ### 2. Start the listener inside UEFN
 

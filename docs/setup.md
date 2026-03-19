@@ -10,13 +10,9 @@
 
 1. Open your project in UEFN
 2. Go to **Edit > Project Settings**
-3. Search for **Python** and enable **Python Editor Script Plugin**
-4. Enable **Editor Scripting Utilities**
-5. Restart the editor
-6. Go to **Edit > Project Settings > Python** and enable **Python Developer Mode**
-7. Restart the editor again
+3. Search for **Python** and check the boxes for **Python Editor Script Plugin**, **Editor Scripting Utilities**, and **Python Developer Mode**
 
-After restart, you should see **Tools > Execute Python Script** in the menu bar.
+After this, you should see **Tools > Execute Python Script** in the menu bar.
 
 ## Step 2: Start the Listener
 
