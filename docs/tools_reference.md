@@ -1,6 +1,6 @@
 # Tools Reference
 
-22 tools organized in 5 categories. Each tool maps 1:1 to a listener command.
+28 tools organized in 6 categories. Each tool maps 1:1 to a listener command.
 
 ---
 
@@ -507,3 +507,97 @@ Move the viewport camera. Only provided fields are changed.
 | `rotation` | float[3] | no | `[pitch, yaw, roll]` in degrees |
 
 **Response:** The new camera position (same format as `get_viewport_camera`).
+
+---
+
+## New in v0.2.0
+
+### `shutdown`
+
+Gracefully stop the listener, freeing the port. The listener finishes the current request before shutting down.
+
+**Parameters:** none
+
+**Response:**
+```json
+{ "status": "shutting_down", "port": 8765 }
+```
+
+---
+
+### `set_actor_properties`
+
+Set properties on an actor via `set_editor_property()`.
+
+> **Note:** UEFN uses Fort\*-prefixed actor classes. Not all properties are writable — some are read-only or don't exist on Fort\* actors. For methods like `set_actor_hidden_in_game()`, use `execute_python` instead.
+
+**Parameters:**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `actor_path` | string | yes | Actor path name or label |
+| `properties` | object | yes | Dict of property names to values |
+
+**Response:**
+```json
+{ "actor_path": "Cube", "properties": { "cast_shadow": "ok" } }
+```
+
+---
+
+### `select_actors`
+
+Programmatically select actors in the UEFN viewport.
+
+**Parameters:**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `actor_paths` | string[] | yes | List of actor path names or labels |
+| `add_to_selection` | bool | no | Add to current selection instead of replacing (default: false) |
+
+**Response:**
+```json
+{ "selected": ["Cube", "Cube2"], "count": 2 }
+```
+
+---
+
+### `focus_selected`
+
+Move the viewport camera to focus on the currently selected actors (like pressing F in the editor).
+
+**Parameters:** none
+
+**Response:**
+```json
+{ "center": { "x": 100, "y": 200, "z": 50 }, "camera": { "x": ..., "y": ..., "z": ... }, "actors_count": 2 }
+```
+
+---
+
+### `get_editor_log`
+
+Read recent lines from the Unreal Editor Output Log file (not the MCP log — the full editor log).
+
+**Parameters:**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `last_n` | int | no | Number of recent lines (default: 100) |
+| `filter_str` | string | no | Only lines containing this string (case-insensitive) |
+
+**Response:** Newline-joined log lines.
+
+---
+
+### `get_project_info`
+
+Get the UEFN project name and content root path. Use this to determine the correct base path for asset operations — in UEFN the content root is `/{ProjectName}/`, **not** `/Game/`.
+
+**Parameters:** none
+
+**Response:**
+```json
+{ "project_name": "MyProject", "content_root": "/MyProject/", "project_dir": "../../../FortniteGame/" }
+```

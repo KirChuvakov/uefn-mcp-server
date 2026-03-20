@@ -21,6 +21,8 @@ Claude Code config (~/.claude/settings.json or project .mcp.json):
 import json
 import os
 import sys
+import threading
+import time
 import urllib.error
 import urllib.request
 from typing import Any, Optional
@@ -31,9 +33,56 @@ from mcp.server.fastmcp import FastMCP
 # Configuration
 # ---------------------------------------------------------------------------
 
-LISTENER_PORT = int(os.environ.get("UEFN_MCP_PORT", "8765"))
-LISTENER_URL = f"http://127.0.0.1:{LISTENER_PORT}"
+DEFAULT_PORT = int(os.environ.get("UEFN_MCP_PORT", "8765"))
+MAX_PORT = 8770
 REQUEST_TIMEOUT = 30.0
+
+_discovered_port: Optional[int] = None
+
+# ---------------------------------------------------------------------------
+# Port discovery
+# ---------------------------------------------------------------------------
+
+
+def _discover_port() -> int:
+    """Find the listener by scanning the port range.
+
+    Tries the last known port first, then scans DEFAULT_PORT..MAX_PORT.
+    Caches the result so subsequent calls are instant.
+    """
+    global _discovered_port
+
+    # Fast path: already discovered and still alive
+    if _discovered_port is not None:
+        if _ping_port(_discovered_port):
+            return _discovered_port
+        _discovered_port = None
+
+    # Scan the range
+    for port in range(DEFAULT_PORT, MAX_PORT + 1):
+        if _ping_port(port):
+            _discovered_port = port
+            return port
+
+    raise ConnectionError(
+        f"UEFN listener not found on ports {DEFAULT_PORT}-{MAX_PORT}. "
+        "Start it in the UEFN editor console: py \"path/to/uefn_listener.py\""
+    )
+
+
+def _ping_port(port: int) -> bool:
+    """Quick check if a listener responds on the given port."""
+    try:
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}",
+            method="GET",
+        )
+        with urllib.request.urlopen(req, timeout=1.0) as resp:
+            body = json.loads(resp.read().decode())
+            return body.get("status") == "ok"
+    except Exception:
+        return False
+
 
 # ---------------------------------------------------------------------------
 # HTTP client
@@ -43,14 +92,21 @@ REQUEST_TIMEOUT = 30.0
 def _send_command(command: str, params: Optional[dict] = None, timeout: float = REQUEST_TIMEOUT) -> dict:
     """Send a command to the UEFN listener and return the result.
 
+    Auto-discovers the listener port by scanning the range.
+
     Raises:
         ConnectionError: Listener is not running.
         RuntimeError: Command failed on the UEFN side.
         TimeoutError: Command timed out.
     """
+    global _discovered_port
+
+    port = _discover_port()
+    url = f"http://127.0.0.1:{port}"
+
     payload = json.dumps({"command": command, "params": params or {}}).encode()
     req = urllib.request.Request(
-        LISTENER_URL,
+        url,
         data=payload,
         headers={"Content-Type": "application/json"},
         method="POST",
@@ -59,12 +115,14 @@ def _send_command(command: str, params: Optional[dict] = None, timeout: float = 
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             body = json.loads(resp.read().decode())
     except urllib.error.URLError as e:
-        if "Connection refused" in str(e) or "No connection" in str(e):
-            raise ConnectionError(
-                "UEFN listener is not running. "
-                "Start it in the UEFN editor console: py \"path/to/uefn_listener.py\""
-            ) from e
-        raise
+        # Port may have changed — invalidate cache and retry once
+        if _discovered_port is not None:
+            _discovered_port = None
+            return _send_command(command, params, timeout)
+        raise ConnectionError(
+            "UEFN listener is not running. "
+            "Start it in the UEFN editor console: py \"path/to/uefn_listener.py\""
+        ) from e
     except Exception as e:
         if "timed out" in str(e).lower():
             raise TimeoutError(f"Command '{command}' timed out after {timeout}s") from e
@@ -81,12 +139,38 @@ def _send_command(command: str, params: Optional[dict] = None, timeout: float = 
 def _check_connection() -> str:
     """Quick connection check, returns status message."""
     try:
-        result = _send_command("ping", timeout=5.0)
-        return f"Connected to UEFN on port {result.get('port', LISTENER_PORT)}"
+        port = _discover_port()
+        return f"Connected to UEFN on port {port}"
     except ConnectionError:
         return "NOT CONNECTED - UEFN listener is not running"
     except Exception as e:
         return f"Connection error: {e}"
+
+
+# ---------------------------------------------------------------------------
+# Heartbeat — periodic ping so the listener knows we're alive
+# ---------------------------------------------------------------------------
+
+_HEARTBEAT_INTERVAL = 10.0
+
+
+def _heartbeat_loop() -> None:
+    """Ping the listener periodically."""
+    time.sleep(3.0)  # wait for listener to be ready
+    while True:
+        try:
+            port = _discover_port()
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{port}",
+                method="GET",
+            )
+            urllib.request.urlopen(req, timeout=2.0)
+        except Exception:
+            pass
+        time.sleep(_HEARTBEAT_INTERVAL)
+
+
+threading.Thread(target=_heartbeat_loop, daemon=True).start()
 
 
 # ---------------------------------------------------------------------------
@@ -100,7 +184,10 @@ mcp = FastMCP(
         "Provides tools to manage actors, assets, levels, and viewport in the UEFN editor. "
         "The 'execute_python' tool is the most powerful — it runs arbitrary Python code "
         "inside the editor with full access to the `unreal` module. "
-        "Use structured tools for common operations and execute_python for everything else."
+        "Use structured tools for common operations and execute_python for everything else.\n\n"
+        "IMPORTANT: When creating tkinter UI windows via execute_python, NEVER call tk.Tk(). "
+        "Use `root = get_tk_root()` to get the shared root, then `tk.Toplevel(root)` for windows. "
+        "Multiple tk.Tk() instances will crash the editor."
     ),
 )
 
@@ -120,8 +207,13 @@ def execute_python(code: str) -> str:
     """Execute arbitrary Python code inside the UEFN editor.
 
     The code runs on the main editor thread with full access to the `unreal` module.
-    Pre-populated variables: unreal, actor_sub, asset_sub, level_sub.
+    Pre-populated variables: unreal, actor_sub, asset_sub, level_sub, tk, get_tk_root.
     Assign to `result` variable to return a value. Use print() for stdout output.
+
+    IMPORTANT — tkinter windows:
+        Use get_tk_root() to get the shared tk.Tk() root, then create windows with
+        tk.Toplevel(root). NEVER create a new tk.Tk() — multiple Tk instances crash
+        the editor. The root is shared across all scripts in the process.
 
     Examples:
         # Get world name
@@ -136,6 +228,18 @@ def execute_python(code: str) -> str:
             'M_Test', '/Game/Materials', unreal.Material, unreal.MaterialFactoryNew()
         )
         result = str(mat.get_path_name())
+
+        # Create a tkinter window (ALWAYS use Toplevel, never tk.Tk!)
+        import threading
+        def show_window():
+            root = get_tk_root()
+            win = tk.Toplevel(root)
+            win.title("My Tool")
+            win.attributes("-topmost", True)
+            tk.Label(win, text="Hello from UEFN").pack(padx=20, pady=20)
+            root.mainloop()
+        threading.Thread(target=show_window, daemon=True).start()
+        result = "Window opened"
     """
     result = _send_command("execute_python", {"code": code})
     parts = []
@@ -153,6 +257,17 @@ def get_log(last_n: int = 50) -> str:
     """Get recent MCP listener log entries from the UEFN editor."""
     result = _send_command("get_log", {"last_n": last_n})
     return "\n".join(result.get("lines", []))
+
+
+@mcp.tool()
+def shutdown() -> str:
+    """Gracefully stop the UEFN listener, freeing the port.
+
+    The listener will finish the current request, then shut down.
+    After this call the listener must be restarted from the UEFN console.
+    """
+    result = _send_command("shutdown", timeout=5.0)
+    return json.dumps(result, indent=2)
 
 
 # -- Actor tools -------------------------------------------------------------
@@ -247,12 +362,68 @@ def set_actor_transform(
 def get_actor_properties(actor_path: str, properties: list[str]) -> str:
     """Read specific properties from an actor.
 
+    Note: UEFN uses Fort*-prefixed actor classes (e.g. FortStaticMeshActor instead of
+    StaticMeshActor). Some standard UE5 property names may not exist on Fort* actors.
+    Properties that fail to read will return an error string instead of a value.
+
     Args:
         actor_path: Actor path name or label.
         properties: List of property names to read (e.g. ['static_mesh_component', 'mobility']).
     """
     result = _send_command("get_actor_properties", {"actor_path": actor_path, "properties": properties})
     return json.dumps(result, indent=2)
+
+
+@mcp.tool()
+def set_actor_properties(actor_path: str, properties: dict[str, Any]) -> str:
+    """Set properties on an actor via set_editor_property().
+
+    Note: UEFN uses Fort*-prefixed actor classes (e.g. FortStaticMeshActor instead of
+    StaticMeshActor). Not all properties are writable — some are read-only or don't exist
+    on Fort* actors. For methods like set_actor_hidden_in_game(), use execute_python instead.
+    Each property reports 'ok' or an error individually.
+
+    Args:
+        actor_path: Actor path name or label.
+        properties: Dict of property names to values (e.g. {'cast_shadow': False}).
+    """
+    result = _send_command("set_actor_properties", {"actor_path": actor_path, "properties": properties})
+    return json.dumps(result, indent=2)
+
+
+@mcp.tool()
+def select_actors(actor_paths: list[str], add_to_selection: bool = False) -> str:
+    """Select actors in the UEFN viewport.
+
+    Args:
+        actor_paths: List of actor path names or labels to select.
+        add_to_selection: If True, add to current selection instead of replacing.
+    """
+    result = _send_command("select_actors", {"actor_paths": actor_paths, "add_to_selection": add_to_selection})
+    return json.dumps(result, indent=2)
+
+
+@mcp.tool()
+def focus_selected() -> str:
+    """Move the viewport camera to focus on the currently selected actors (like pressing F)."""
+    result = _send_command("focus_selected")
+    return json.dumps(result, indent=2)
+
+
+
+@mcp.tool()
+def get_editor_log(last_n: int = 100, filter_str: str = "") -> str:
+    """Read recent lines from the Unreal Editor Output Log.
+
+    Args:
+        last_n: Number of recent lines to return.
+        filter_str: Optional filter — only lines containing this string (case-insensitive).
+    """
+    result = _send_command("get_editor_log", {"last_n": last_n, "filter_str": filter_str})
+    lines = result.get("lines", [])
+    if result.get("error"):
+        return f"Error: {result['error']}"
+    return "\n".join(lines)
 
 
 # -- Asset tools -------------------------------------------------------------
@@ -359,6 +530,21 @@ def search_assets(class_name: str = "", directory: str = "/Game/", recursive: bo
     return json.dumps(result, indent=2)
 
 
+# -- Project tools -----------------------------------------------------------
+
+
+@mcp.tool()
+def get_project_info() -> str:
+    """Get the UEFN project name and content root path.
+
+    Use the returned content_root as the base path for asset operations
+    (e.g. list_assets, search_assets, create assets via execute_python).
+    In UEFN the content root is '/{ProjectName}/', NOT '/Game/'.
+    """
+    result = _send_command("get_project_info")
+    return json.dumps(result, indent=2)
+
+
 # -- Level tools -------------------------------------------------------------
 
 
@@ -411,10 +597,9 @@ def set_viewport_camera(
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    # Allow --port override
+    # Allow --port override (skips auto-discovery, uses fixed port)
     for i, arg in enumerate(sys.argv[1:], 1):
         if arg == "--port" and i < len(sys.argv) - 1:
-            LISTENER_PORT = int(sys.argv[i + 1])
-            LISTENER_URL = f"http://127.0.0.1:{LISTENER_PORT}"
+            _discovered_port = int(sys.argv[i + 1])
 
     mcp.run()
