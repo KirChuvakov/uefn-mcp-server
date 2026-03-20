@@ -26,26 +26,21 @@ After this, you should see **Tools > Execute Python Script** in the menu bar.
 
 1. In UEFN, go to **Tools > Execute Python Script**
 2. Navigate to and select `uefn_listener.py`
-3. Check the **Output Log** (Window > Output Log) for confirmation:
+3. A **status window** will appear:
 
 ```
-[MCP] Listener started on http://127.0.0.1:8765
-[MCP] Registered 22 command handlers
+UEFN MCP Listener  v0.2.0
+● Listener: Running
+● MCP Server: Connecting...
+
+Port      8765
+Uptime    0m 05s
+Requests  0
+...
 ```
 
-You can also verify from a terminal:
-```bash
-curl http://127.0.0.1:8765/
-```
-
-Expected response:
-```json
-{
-  "status": "ok",
-  "port": 8765,
-  "commands": ["ping", "get_log", "execute_python", ...]
-}
-```
+The window shows real-time status — you don't need to check the Output Log.
+You can safely close the window; the listener continues running in the background.
 
 ### Auto-start on editor launch
 
@@ -144,20 +139,25 @@ The UEFN MCP tools should now be available. Test with: "ping the UEFN editor".
 
 ## Listener Management
 
-### Restart the listener
+### Using the status window
 
-Use **Tools > Execute Python Script** and run `uefn_listener.py` again. If already running, it will report the current port.
+The status window provides **Stop**, **Start**, and **Restart** buttons. When stopped, you can change the port number before starting again.
 
-To force restart, create a small script:
-```python
-import uefn_listener
-uefn_listener.restart_listener()
-```
+Status indicators:
+- **Listener: Running** (green) — HTTP server is active
+- **Listener: Stopped** (red) — HTTP server is not running
+- **MCP Server: Connected** (green) — Claude Code is actively connected (heartbeat received)
+- **MCP Server: Connecting...** (yellow) — listener just started, waiting for first heartbeat
+- **MCP Server: Lost Xs ago** (gray) — Claude Code disconnected or was restarted
 
-### Check status
+### Re-running the script
 
-```bash
-curl http://127.0.0.1:8765/
-```
+Running `uefn_listener.py` again via **Tools > Execute Python Script** is safe — it will cleanly replace the previous listener and open a new status window.
 
-Or from Claude Code, use the `ping` tool.
+### Check status from Claude Code
+
+Use the `ping` tool, or ask: *"Is the UEFN listener running?"*
+
+### Shutdown from Claude Code
+
+Use the `shutdown` tool to stop the listener remotely. The port is freed immediately.

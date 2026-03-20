@@ -28,13 +28,14 @@ If you prefer to do it manually, follow steps 1-5 below.
 
 Use **Tools > Execute Python Script** in the UEFN menu bar, then select the `uefn_listener.py` file.
 
-In the Output Log you should see:
-```
-[MCP] Listener started on http://127.0.0.1:8765
-[MCP] Registered 28 command handlers
-```
+A **status window** will appear showing:
+- **Listener status** — green when running, red when stopped
+- **MCP Server status** — green when Claude Code is connected (heartbeat every 10s)
+- **Port** — editable when listener is stopped
+- **Metrics** — uptime, request count, errors, last command, avg response time
+- **Controls** — Stop / Start / Restart buttons
 
-A status window will appear showing listener state and MCP server connection.
+You can safely close this window — the listener continues running in the background.
 
 ### 3. Install MCP SDK
 
