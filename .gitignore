@@ -9,3 +9,5 @@ build/
 .venv/
 venv/
 .env
+.claude
+docs/generated
