@@ -72,6 +72,30 @@ Ask Claude Code:
 - *"What assets are in /Game/Materials/?"*
 - *"Move the viewport camera to look at the origin"*
 
+## Using with Cursor
+
+The server is a standard stdio MCP server, so it works with [Cursor](https://cursor.com) **without any code changes** — only the config file location differs from Claude Code.
+
+1. Do steps **1–3** above (enable Python in UEFN, start the listener, `pip install mcp`).
+2. Create `.cursor/mcp.json` in your project root (or `~/.cursor/mcp.json` to enable it for every project):
+
+```json
+{
+  "mcpServers": {
+    "uefn": {
+      "command": "python",
+      "args": ["C:/path/to/uefn-mcp-server/mcp_server.py"]
+    }
+  }
+}
+```
+
+3. Reload Cursor (Command Palette → **Developer: Reload Window**), then confirm the `uefn` server appears under **Settings → Tools & MCP**. It only exposes its tools once the listener is running inside UEFN.
+
+The custom-port and environment-variable options in [Configuration](#configuration) work the same way in `.cursor/mcp.json`.
+
+> **Windows note:** if `python` opens the Microsoft Store instead of starting the server (and no tools appear), see [Troubleshooting → `python` opens the Microsoft Store](docs/troubleshooting.md#python-opens-the-microsoft-store-windows). This affects Claude Code too, not just Cursor.
+
 ## Auto-start (optional)
 
 To start the listener automatically when UEFN opens your project:
@@ -178,7 +202,7 @@ Run via **Tools > Execute Python Script** in the UEFN menu bar.
 - UEFN editor with Python scripting enabled (Project Settings)
 - Python 3.10+ on host system
 - `pip install mcp`
-- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI
+- An MCP client — [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI or [Cursor](https://cursor.com) (see [Using with Cursor](#using-with-cursor))
 
 ## License
 

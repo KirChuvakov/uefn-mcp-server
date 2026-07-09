@@ -128,6 +128,38 @@ Make sure you're installing for the same Python that `.mcp.json` references. If 
 python3 -m pip install mcp
 ```
 
+### `python` opens the Microsoft Store (Windows)
+
+**Cause:** Windows ships an "App execution alias" — a stub `python.exe` that opens the Microsoft Store when no real interpreter is installed (or when the stub takes priority on `PATH`). Your MCP client runs `python`, the Store launches instead of Python, and the server never starts. This usually fails **silently**: no tools appear and there's often no error message. It affects any client (Claude Code, Cursor, etc.), not a specific one.
+
+**Symptoms:**
+- Running `python --version` in a terminal hangs or pops the Microsoft Store
+- The MCP client shows the `uefn` server but no tools, with no obvious error
+
+**Fix (any one of these):**
+
+1. Install a real interpreter and use it, e.g.:
+   ```bash
+   winget install Python.Python.3.12
+   ```
+2. Disable the stubs: **Settings → Apps → Advanced app settings → App execution aliases**, then toggle off `python.exe` and `python3.exe`.
+3. Bypass `PATH` entirely by pointing `command` at the absolute interpreter path in your config:
+   ```json
+   {
+     "mcpServers": {
+       "uefn": {
+         "command": "C:/Users/<you>/AppData/Local/Programs/Python/Python312/python.exe",
+         "args": ["C:/path/to/mcp_server.py"]
+       }
+     }
+   }
+   ```
+
+Verify the interpreter you configured actually has the SDK:
+```bash
+"C:/Users/<you>/AppData/Local/Programs/Python/Python312/python.exe" -c "from mcp.server.fastmcp import FastMCP; print('OK')"
+```
+
 ## Editor Issues
 
 ### Editor freezes briefly when executing commands
