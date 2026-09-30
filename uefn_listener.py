@@ -9,6 +9,7 @@ Usage (in UEFN editor console):
 Or auto-start via init_unreal.py.
 """
 
+import atexit
 import io
 import json
 import os
@@ -814,8 +815,55 @@ class _MCPHandler(BaseHTTPRequestHandler):
 # ---------------------------------------------------------------------------
 
 
+_watchdog_state = {"last_check": 0.0}
+WATCHDOG_INTERVAL_SEC = 30.0
+
+
+def _watchdog_check() -> None:
+    """Self-heal: verify the HTTP server thread is alive AND the port actually
+    accepts connections; rebind if not (the old port may be held by a zombie
+    socket, in which case _find_free_port moves to the next one)."""
+    if unreal._mcp_server is None:
+        return
+    now = time.monotonic()
+    if now - _watchdog_state["last_check"] < WATCHDOG_INTERVAL_SEC:
+        return
+    _watchdog_state["last_check"] = now
+
+    thread = unreal._mcp_server_thread
+    broken = thread is None or not thread.is_alive()
+    if not broken:
+        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        probe.settimeout(1.0)
+        try:
+            probe.connect(("127.0.0.1", unreal._mcp_bound_port))
+        except OSError:
+            broken = True
+        finally:
+            probe.close()
+    if not broken:
+        return
+
+    _log("Watchdog: listener unreachable — rebinding", "warning")
+    # Do NOT go through stop_listener(): shutdown() can block the main thread
+    # if the serve loop is wedged. Close the socket and rebind fresh.
+    try:
+        unreal._mcp_server.server_close()
+    except Exception:
+        pass
+    unreal._mcp_server = None
+    unreal._mcp_server_thread = None
+    unreal._mcp_bound_port = 0
+    try:
+        start_listener(show_status=False)
+    except Exception as e:
+        _log(f"Watchdog: restart failed: {e}", "error")
+
+
 def _tick_handler(delta_time: float) -> None:
     """Process queued commands and main-thread tasks."""
+    _watchdog_check()
+
     # Drain general-purpose main-thread queue
     while not _main_queue.empty():
         try:
@@ -1661,17 +1709,30 @@ def _start_tray() -> None:
 
 
 def _find_free_port() -> int:
-    """Find a free port in the configured range."""
+    """Find a free port in the configured range.
+
+    NOTE: deliberately NO SO_REUSEADDR — on Windows it lets bind() succeed on
+    a port still held by a zombie socket (leaked when UEFN disables Python on
+    project close/switch without the listener closing its socket), which made
+    this probe report the dead port as free and left the new listener
+    unreachable behind the zombie.
+    """
     for port in range(DEFAULT_PORT, MAX_PORT + 1):
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             s.bind(("127.0.0.1", port))
             s.close()
             return port
         except OSError:
             continue
     raise RuntimeError(f"No free port in range {DEFAULT_PORT}-{MAX_PORT}")
+
+
+class _ExclusiveHTTPServer(HTTPServer):
+    # HTTPServer defaults allow_reuse_address=1; on Windows that binds over
+    # zombie sockets leaked by a previous Python interpreter (project switch),
+    # producing a listener that logs success but never receives connections.
+    allow_reuse_address = False
 
 
 def start_listener(port: int = 0, show_status: bool = True) -> int:
@@ -1691,7 +1752,7 @@ def start_listener(port: int = 0, show_status: bool = True) -> int:
     if port == 0:
         port = _find_free_port()
 
-    unreal._mcp_server = HTTPServer(("127.0.0.1", port), _MCPHandler)
+    unreal._mcp_server = _ExclusiveHTTPServer(("127.0.0.1", port), _MCPHandler)
     unreal._mcp_bound_port = port
 
     unreal._mcp_server_thread = threading.Thread(
@@ -1758,6 +1819,43 @@ def restart_listener(port: int = 0) -> int:
     stop_listener()
     time.sleep(0.5)
     return start_listener(port, show_status=False)
+
+
+# ---------------------------------------------------------------------------
+# Python-shutdown cleanup
+# ---------------------------------------------------------------------------
+# UEFN destroys the Python interpreter when the project is closed or switched
+# (IPythonScriptPlugin::DisablePythonAtRuntime). The listening socket is a
+# process-level OS handle: left open it survives the interpreter as a zombie
+# that keeps the port bound and refuses every connection until the editor
+# exits. Close it (and the tray icon) while the interpreter is still alive.
+
+
+def _release_resources_at_python_shutdown() -> None:
+    srv = getattr(unreal, "_mcp_server", None)
+    if srv is not None:
+        try:
+            srv.server_close()
+        except Exception:
+            pass
+        unreal._mcp_server = None
+        unreal._mcp_server_thread = None
+        unreal._mcp_bound_port = 0
+    tray = getattr(unreal, "_mcp_tray", None)
+    if tray is not None:
+        try:
+            tray.stop()
+        except Exception:
+            pass
+        unreal._mcp_tray = None
+
+
+atexit.register(_release_resources_at_python_shutdown)
+if hasattr(unreal, "register_python_shutdown_callback"):
+    try:
+        unreal.register_python_shutdown_callback(_release_resources_at_python_shutdown)
+    except Exception:
+        pass  # atexit registration above is the fallback
 
 
 # ---------------------------------------------------------------------------
