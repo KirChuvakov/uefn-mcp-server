@@ -1636,6 +1636,100 @@ def mesh_scatter(
 
 
 # ---------------------------------------------------------------------------
+# Verse introspection
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+def verse_list_services() -> str:
+    """List all Verse classes implementing ``i_service`` across the project.
+
+    Parses `.verse` files under the UEFN project directory (excluding
+    Intermediate/Saved/Binaries). Returns each service's name, path,
+    line, parent interfaces, and which lifecycle interfaces it implements
+    (i_initializable, i_player_listener, i_character_listener).
+    """
+    result = _send_command("verse_list_services")
+    return json.dumps(result, indent=2)
+
+
+@mcp.tool()
+def verse_list_editables(class_filter: str = "") -> str:
+    """List ``@editable`` fields grouped by their enclosing Verse class.
+
+    Args:
+        class_filter: Case-insensitive substring match on class name.
+            Empty = include every class with @editable fields.
+    """
+    result = _send_command("verse_list_editables", {"class_filter": class_filter})
+    return json.dumps(result, indent=2)
+
+
+@mcp.tool()
+def verse_service_graph(installer_filename: str = "_service_installer.verse") -> str:
+    """Parse the composition-root file and return the DI graph.
+
+    Follows the project convention: ``Name := class_name:`` archetype
+    blocks with indented ``Field := Source`` dependency wiring. For each
+    declared service, returns its class, declaration line, and dependency
+    list.
+
+    Args:
+        installer_filename: Basename to search for. First match wins.
+    """
+    result = _send_command("verse_service_graph", {"installer_filename": installer_filename})
+    return json.dumps(result, indent=2)
+
+
+@mcp.tool()
+def verse_find_resource_usage(
+    enum_name: str = "resource",
+    enum_filename: str = "_resource_type.verse",
+    max_sites_per_variant: int = 20,
+) -> str:
+    """Find usages of each variant of a Verse enum across all `.verse` files.
+
+    Defaults target the project's `resource` enum (Money, Crystal, etc.).
+    Useful for locating every read/write site of a given resource token.
+
+    Args:
+        enum_name: Enum type name.
+        enum_filename: Basename of the file containing the enum declaration.
+        max_sites_per_variant: Cap per-variant site list to keep response size
+            manageable. The ``count`` field is always the true total.
+    """
+    result = _send_command("verse_find_resource_usage", {
+        "enum_name": enum_name,
+        "enum_filename": enum_filename,
+        "max_sites_per_variant": max_sites_per_variant,
+    })
+    return json.dumps(result, indent=2)
+
+
+@mcp.tool()
+def verse_check_editable_coverage(
+    config_class: str = "world_accessor_device",
+) -> str:
+    """Source-side audit: find @editable fields of a config class that are
+    never referenced anywhere else in the project.
+
+    UEFN's ScriptDevice bindings block reading Verse @editable values from
+    Python, so runtime cross-check against the live level isn't possible.
+    Instead this scans `.verse` sources: for each @editable field it counts
+    references across the project and flags fields with zero references as
+    potentially unused. Useful for spotting forgotten config slots after a
+    refactor.
+
+    Args:
+        config_class: Verse class name to audit.
+    """
+    result = _send_command("verse_check_editable_coverage", {
+        "config_class": config_class,
+    })
+    return json.dumps(result, indent=2)
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 

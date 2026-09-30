@@ -14,6 +14,7 @@ import io
 import json
 import os
 import queue
+import re
 import socket
 import sys
 import threading
@@ -2224,6 +2225,416 @@ def _cmd_mesh_scatter(
         "attempted": attempts,
         "skipped_clearance": skipped_clearance,
         "actors": placed,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Verse introspection (regex-based .verse file parsing)
+# ---------------------------------------------------------------------------
+
+
+_VERSE_CLASS_RE = re.compile(
+    r'^(?P<indent>[ \t]*)(?P<name>[A-Za-z_][\w]*)\s*(?:<[^>]+>)?\s*:=\s*class\s*(?:<[^>]+>)?\s*\(\s*(?P<parents>[^)]*)\s*\)',
+    re.MULTILINE,
+)
+_VERSE_EDITABLE_RE = re.compile(
+    r'@editable(?:\s*\([^)]*\))?\s*\n\s*(?P<name>[A-Za-z_][\w]*)\s*:\s*(?P<type>[^=\n#]+?)(?:\s*=\s*[^\n#]*)?\s*(?:#.*)?$',
+    re.MULTILINE,
+)
+
+
+def _verse_project_root() -> str:
+    """Return absolute path of the UEFN project's plugin content dir.
+
+    UEFN Creative projects are mounted as a single plugin (e.g.
+    ``/di_template/``). ``unreal.Paths.project_dir()`` returns Fortnite's
+    install — NOT the user's project — so we resolve the plugin content
+    dir from the current world's mount point via PluginBlueprintLibrary.
+    """
+    world = unreal.EditorLevelLibrary.get_editor_world()
+    if world is None:
+        raise RuntimeError("No editor world loaded")
+    parts = world.get_path_name().split("/")
+    if len(parts) < 2 or not parts[1]:
+        raise RuntimeError(f"Unexpected world path: {world.get_path_name()}")
+    plugin_name = parts[1]
+    content_dir = unreal.PluginBlueprintLibrary.get_plugin_content_dir(plugin_name)
+    if not content_dir:
+        raise RuntimeError(f"Plugin content dir not found for '{plugin_name}'")
+    return os.path.abspath(content_dir)
+
+
+def _verse_scan_files() -> List[str]:
+    """Return absolute paths of all .verse files under the UEFN project."""
+    root = _verse_project_root()
+    skip_segs = (os.sep + "Intermediate" + os.sep,
+                 os.sep + "Saved" + os.sep,
+                 os.sep + "Binaries" + os.sep)
+    out: List[str] = []
+    for dirpath, _dirnames, filenames in os.walk(root):
+        low = dirpath + os.sep
+        if any(seg in low for seg in skip_segs):
+            continue
+        for fn in filenames:
+            if fn.endswith(".verse"):
+                out.append(os.path.join(dirpath, fn))
+    return out
+
+
+def _verse_read(path: str) -> str:
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            return fh.read()
+    except UnicodeDecodeError:
+        with open(path, "r", encoding="latin-1") as fh:
+            return fh.read()
+    except Exception:
+        return ""
+
+
+def _verse_split_parents(parents: str) -> List[str]:
+    out: List[str] = []
+    depth = 0
+    buf: List[str] = []
+    for ch in parents:
+        if ch == "<":
+            depth += 1
+            buf.append(ch)
+        elif ch == ">":
+            depth -= 1
+            buf.append(ch)
+        elif ch == "," and depth == 0:
+            name = "".join(buf).strip()
+            if name:
+                out.append(name)
+            buf = []
+        else:
+            buf.append(ch)
+    tail = "".join(buf).strip()
+    if tail:
+        out.append(tail)
+    return [re.sub(r"<[^>]+>", "", n).strip() for n in out]
+
+
+def _verse_rel(path: str, root: str) -> str:
+    try:
+        return os.path.relpath(path, root).replace("\\", "/")
+    except Exception:
+        return path
+
+
+def _verse_collect_classes(src: str) -> List[dict]:
+    """Return all class declarations in source with position + parents."""
+    out: List[dict] = []
+    for m in _VERSE_CLASS_RE.finditer(src):
+        parents = _verse_split_parents(m.group("parents") or "")
+        out.append({
+            "name": m.group("name"),
+            "start": m.start(),
+            "line": src.count("\n", 0, m.start()) + 1,
+            "parents": parents,
+        })
+    return out
+
+
+@_register("verse_list_services")
+def _cmd_verse_list_services() -> dict:
+    """List Verse classes implementing ``i_service``.
+
+    Returns {count, services: [{name, rel_path, line, parents,
+    is_initializable, is_player_listener, is_character_listener}]}.
+    """
+    root = _verse_project_root()
+    services = []
+    for path in _verse_scan_files():
+        src = _verse_read(path)
+        if not src or "i_service" not in src:
+            continue
+        for cls in _verse_collect_classes(src):
+            parents = cls["parents"]
+            if "i_service" not in parents:
+                continue
+            services.append({
+                "name": cls["name"],
+                "rel_path": _verse_rel(path, root),
+                "line": cls["line"],
+                "parents": parents,
+                "is_initializable": "i_initializable" in parents,
+                "is_player_listener": "i_player_listener" in parents,
+                "is_character_listener": "i_character_listener" in parents,
+            })
+    services.sort(key=lambda s: s["name"])
+    return {"count": len(services), "services": services}
+
+
+@_register("verse_list_editables")
+def _cmd_verse_list_editables(class_filter: str = "") -> dict:
+    """List @editable fields grouped by enclosing class.
+
+    Args:
+        class_filter: Case-insensitive substring match on class name.
+            Empty = include all classes that contain @editable fields.
+
+    Returns {class_count, field_count, by_class: {name: {rel_path, line,
+    parents, fields: [{name, type, line}]}}}.
+    """
+    root = _verse_project_root()
+    filt = class_filter.lower()
+    by_class: Dict[str, dict] = {}
+    for path in _verse_scan_files():
+        src = _verse_read(path)
+        if not src or "@editable" not in src:
+            continue
+        classes = _verse_collect_classes(src)
+        if not classes:
+            continue
+        for em in _VERSE_EDITABLE_RE.finditer(src):
+            owner = None
+            for c in classes:
+                if c["start"] < em.start():
+                    owner = c
+                else:
+                    break
+            if owner is None:
+                continue
+            if filt and filt not in owner["name"].lower():
+                continue
+            entry = by_class.setdefault(owner["name"], {
+                "rel_path": _verse_rel(path, root),
+                "line": owner["line"],
+                "parents": owner["parents"],
+                "fields": [],
+            })
+            entry["fields"].append({
+                "name": em.group("name"),
+                "type": em.group("type").strip(),
+                "line": src.count("\n", 0, em.start()) + 1,
+            })
+    total = sum(len(v["fields"]) for v in by_class.values())
+    return {
+        "class_count": len(by_class),
+        "field_count": total,
+        "by_class": by_class,
+    }
+
+
+@_register("verse_service_graph")
+def _cmd_verse_service_graph(installer_filename: str = "_service_installer.verse") -> dict:
+    """Parse the composition-root file and extract the DI graph.
+
+    Expects the project convention: each service is constructed via a
+    ``Name := class_name:`` archetype block with indented
+    ``Field := Source`` lines. Heuristic parser — brittle if the file
+    diverges from the convention.
+
+    Args:
+        installer_filename: Basename to search for. First match wins.
+
+    Returns {path, count, services: [{name, class, line, deps:
+    [{field, source}]}]}.
+    """
+    root = _verse_project_root()
+    target = None
+    for path in _verse_scan_files():
+        if os.path.basename(path) == installer_filename:
+            target = path
+            break
+    if target is None:
+        raise ValueError(f"Installer file not found: {installer_filename}")
+    src = _verse_read(target)
+    svc_decl = re.compile(
+        r'^(?P<indent>[ \t]*)(?P<name>[A-Za-z_][\w]*)\s*:=\s*(?P<cls>[A-Za-z_][\w]*)\s*:\s*$',
+        re.MULTILINE,
+    )
+    field_decl = re.compile(
+        r'^(?P<indent>[ \t]+)(?P<field>[A-Za-z_][\w]*)\s*:=\s*(?P<src>[^\n#]+?)\s*(?:#.*)?$',
+        re.MULTILINE,
+    )
+    reserved = {"class", "module", "enum", "struct", "interface", "option"}
+    decls = list(svc_decl.finditer(src))
+    services = []
+    for i, m in enumerate(decls):
+        cls_name = m.group("cls")
+        if cls_name in reserved:
+            continue  # declaration like `foo := class:` — not a service archetype
+        header_indent_len = len(m.group("indent").expandtabs(4))
+        block_start = m.end()
+        block_end = decls[i + 1].start() if i + 1 < len(decls) else len(src)
+        deps = []
+        for fm in field_decl.finditer(src, block_start, block_end):
+            if len(fm.group("indent").expandtabs(4)) <= header_indent_len:
+                break
+            deps.append({
+                "field": fm.group("field"),
+                "source": fm.group("src").strip().rstrip(","),
+            })
+        services.append({
+            "name": m.group("name"),
+            "class": cls_name,
+            "line": src.count("\n", 0, m.start()) + 1,
+            "deps": deps,
+        })
+    return {
+        "path": _verse_rel(target, root),
+        "count": len(services),
+        "services": services,
+    }
+
+
+@_register("verse_find_resource_usage")
+def _cmd_verse_find_resource_usage(
+    enum_name: str = "resource",
+    enum_filename: str = "_resource_type.verse",
+    max_sites_per_variant: int = 20,
+) -> dict:
+    """Find usages of each variant of a Verse enum across all .verse files.
+
+    Default scans the 'resource' enum in '_resource_type.verse' — the
+    project convention for money/crystal/etc. tokens.
+
+    Args:
+        enum_name: Enum type name (default 'resource').
+        enum_filename: Basename of the file containing the enum.
+        max_sites_per_variant: Cap per-variant site list to keep result size
+            sane. Total count is always accurate.
+
+    Returns {enum, variants, by_variant: {name: {count, sites: [...]}}}.
+    """
+    root = _verse_project_root()
+    enum_path = None
+    for path in _verse_scan_files():
+        if os.path.basename(path) == enum_filename:
+            enum_path = path
+            break
+    if enum_path is None:
+        raise ValueError(f"Enum file not found: {enum_filename}")
+    enum_src = _verse_read(enum_path)
+    enum_decl = re.compile(
+        rf'^\s*{re.escape(enum_name)}\s*(?:<[^>]+>)?\s*:=\s*enum\s*:\s*$',
+        re.MULTILINE,
+    )
+    em = enum_decl.search(enum_src)
+    if em is None:
+        raise ValueError(f"Enum '{enum_name}' not found in {enum_filename}")
+    variants: List[str] = []
+    saw_any = False
+    for line in enum_src[em.end():].splitlines():
+        s = line.strip()
+        if not s:
+            if saw_any:
+                break
+            continue
+        if s.startswith("#"):
+            continue
+        mm = re.match(r'^([A-Za-z_][\w]*)', s)
+        if not mm:
+            break
+        variants.append(mm.group(1))
+        saw_any = True
+    by_variant: Dict[str, dict] = {v: {"count": 0, "sites": []} for v in variants}
+    word_re = {v: re.compile(rf'\b{re.escape(v)}\b') for v in variants}
+    for path in _verse_scan_files():
+        if path == enum_path:
+            continue
+        src = _verse_read(path)
+        if not src or not any(v in src for v in variants):
+            continue
+        for lineno, line in enumerate(src.splitlines(), start=1):
+            for v in variants:
+                if word_re[v].search(line):
+                    entry = by_variant[v]
+                    entry["count"] += 1
+                    if len(entry["sites"]) < max_sites_per_variant:
+                        entry["sites"].append({
+                            "rel_path": _verse_rel(path, root),
+                            "line": lineno,
+                            "text": line.strip()[:200],
+                        })
+    return {
+        "enum": enum_name,
+        "variants": variants,
+        "by_variant": by_variant,
+    }
+
+
+@_register("verse_check_editable_coverage")
+def _cmd_verse_check_editable_coverage(
+    config_class: str = "world_accessor_device",
+) -> dict:
+    """Source-side audit of a config class's @editable fields.
+
+    UEFN's ScriptDevice bindings block reading Verse @editable values
+    from Python, so this tool performs a static analysis instead:
+
+    1. Parse the config class in .verse sources, extract @editable fields.
+    2. For each field, count references across the rest of the project
+       (e.g. ``World.NotificationServiceConfig``).
+    3. Flag fields with zero references as potentially unused.
+
+    Useful for spotting forgotten config slots after a refactor.
+
+    Args:
+        config_class: Verse class name (default world_accessor_device).
+
+    Returns {config_class, rel_path, total, unused_count,
+    fields: [{name, type, ref_count, unused, sites: [...]}]}.
+    """
+    editables_all = _cmd_verse_list_editables(class_filter=config_class)["by_class"]
+    editables = editables_all.get(config_class)
+    if editables is None:
+        # prefer exact match when substring produced extras
+        for k, v in editables_all.items():
+            if k == config_class:
+                editables = v
+                break
+    if editables is None:
+        raise ValueError(f"Config class not found in .verse sources: {config_class}")
+
+    root = _verse_project_root()
+    config_path = os.path.join(root, editables["rel_path"].replace("/", os.sep))
+    field_names = [f["name"] for f in editables["fields"]]
+    field_res = {n: re.compile(rf'\b{re.escape(n)}\b') for n in field_names}
+    counts: Dict[str, int] = {n: 0 for n in field_names}
+    sites: Dict[str, List[dict]] = {n: [] for n in field_names}
+
+    for path in _verse_scan_files():
+        if os.path.abspath(path) == os.path.abspath(config_path):
+            continue  # skip self — the declaration file
+        src = _verse_read(path)
+        if not src:
+            continue
+        if not any(n in src for n in field_names):
+            continue
+        for lineno, line in enumerate(src.splitlines(), start=1):
+            for n in field_names:
+                if field_res[n].search(line):
+                    counts[n] += 1
+                    if len(sites[n]) < 10:
+                        sites[n].append({
+                            "rel_path": _verse_rel(path, root),
+                            "line": lineno,
+                            "text": line.strip()[:200],
+                        })
+
+    fields_out = []
+    for fld in editables["fields"]:
+        n = fld["name"]
+        ref_count = counts[n]
+        fields_out.append({
+            "name": n,
+            "type": fld["type"],
+            "line": fld["line"],
+            "ref_count": ref_count,
+            "unused": ref_count == 0,
+            "sites": sites[n],
+        })
+    unused = sum(1 for f in fields_out if f["unused"])
+    return {
+        "config_class": config_class,
+        "rel_path": editables["rel_path"],
+        "total": len(fields_out),
+        "unused_count": unused,
+        "fields": fields_out,
     }
 
 
