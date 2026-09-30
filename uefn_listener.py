@@ -11,6 +11,7 @@ Or auto-start via init_unreal.py.
 
 import io
 import json
+import os
 import queue
 import socket
 import sys
@@ -28,6 +29,13 @@ import unreal
 # ---------------------------------------------------------------------------
 
 PROTOCOL_VERSION = "0.2.0"
+VERSION_SUFFIX = "by Romasno"
+
+try:
+    _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+except NameError:
+    _SCRIPT_DIR = os.getcwd()
+ICON_PATH = os.path.join(_SCRIPT_DIR, "icon.png")
 DEFAULT_PORT = 8765
 MAX_PORT = 8770
 TICK_BATCH_LIMIT = 5
@@ -35,6 +43,28 @@ HTTP_TIMEOUT_SEC = 30.0
 POLL_INTERVAL_SEC = 0.02
 STALE_CLEANUP_SEC = 60.0
 LOG_RING_SIZE = 200
+ERROR_LOG_SIZE = 50
+TASK_LOG_SIZE = 200
+
+# ---------------------------------------------------------------------------
+# Optional system-tray support (pystray + Pillow).
+# These are vendored into ./vendor next to this file (installed with the same
+# UEFN Python so the Pillow C-extension ABI matches). If they are missing the
+# listener still works — it just falls back to "hide window" with no tray icon.
+# ---------------------------------------------------------------------------
+
+_VENDOR_DIR = os.path.join(_SCRIPT_DIR, "vendor")
+if os.path.isdir(_VENDOR_DIR) and _VENDOR_DIR not in sys.path:
+    sys.path.insert(0, _VENDOR_DIR)
+
+try:
+    import pystray  # type: ignore
+    from PIL import Image as PIL_Image  # type: ignore
+    _TRAY_AVAILABLE = True
+except Exception as _tray_import_err:  # pragma: no cover - import guard
+    pystray = None  # type: ignore
+    PIL_Image = None  # type: ignore
+    _TRAY_AVAILABLE = False
 
 # ---------------------------------------------------------------------------
 # State
@@ -58,6 +88,9 @@ def _init_shared_state() -> None:
         "_mcp_responses_lock": threading.Lock(),
         "_mcp_request_counter": 0,
         "_mcp_log_ring": [],
+        "_mcp_error_log": [],
+        "_mcp_task_log": [],
+        "_mcp_current_task": {"command": None, "start_time": 0.0},
         "_mcp_metrics": {
             "started_at": 0.0,
             "total_requests": 0,
@@ -69,6 +102,7 @@ def _init_shared_state() -> None:
             "response_times_ms": [],
         },
         "_mcp_status_window": None,
+        "_mcp_tray": None,
     }
     for attr, default in defaults.items():
         if not hasattr(unreal, attr):
@@ -83,6 +117,9 @@ _main_queue: queue.Queue = unreal._mcp_main_queue
 _responses: Dict[str, dict] = unreal._mcp_responses
 _responses_lock: threading.Lock = unreal._mcp_responses_lock
 _log_ring: List[str] = unreal._mcp_log_ring
+_error_log: List[Dict[str, Any]] = unreal._mcp_error_log
+_task_log: List[Dict[str, Any]] = unreal._mcp_task_log
+_current_task: Dict[str, Any] = unreal._mcp_current_task
 _metrics: Dict[str, Any] = unreal._mcp_metrics
 
 # ---------------------------------------------------------------------------
@@ -201,6 +238,28 @@ def _dispatch(command: str, params: dict) -> dict:
     if handler is None:
         raise ValueError(f"Unknown command: {command}. Available: {list(_HANDLERS.keys())}")
     return handler(**params)
+
+
+def _describe_command(command: str, params: dict) -> str:
+    """Human-friendly label for task log / status window.
+
+    For execute_python extracts a '# DESC: ...' comment if present, otherwise
+    the first non-empty non-comment line. Other commands use their name.
+    """
+    if command != "execute_python":
+        return command
+    code = params.get("code", "") or ""
+    lines = code.splitlines()
+    for ln in lines[:8]:
+        s = ln.strip()
+        if s.lower().startswith("# desc:"):
+            return f"py: {s[7:].strip()[:80]}"
+    for ln in lines:
+        s = ln.strip()
+        if s and not s.startswith("#"):
+            trimmed = s[:80] + ("\u2026" if len(s) > 80 else "")
+            return f"py: {trimmed}"
+    return "execute_python"
 
 
 # -- System ------------------------------------------------------------------
@@ -776,22 +835,47 @@ def _tick_handler(delta_time: float) -> None:
             break
 
         t0 = time.time()
+        display = _describe_command(command, params)
+        _current_task["command"] = display
+        _current_task["start_time"] = t0
         try:
             result = _dispatch(command, params)
             response = {"success": True, "result": result}
         except Exception as e:
-            _log(f"Command '{command}' failed: {e}", "error")
-            response = {"success": False, "error": str(e), "traceback": traceback.format_exc()}
+            tb = traceback.format_exc()
+            _log(f"Command '{display}' failed: {e}", "error")
+            response = {"success": False, "error": str(e), "traceback": tb}
             _metrics["total_errors"] += 1
             _metrics["last_error"] = str(e)
+            _error_log.append({
+                "time": time.time(),
+                "command": display,
+                "error": str(e),
+                "traceback": tb,
+            })
+            if len(_error_log) > ERROR_LOG_SIZE:
+                _error_log.pop(0)
+        finally:
+            _current_task["command"] = None
+            _current_task["start_time"] = 0.0
 
         elapsed_ms = (time.time() - t0) * 1000
         _metrics["total_requests"] += 1
         _metrics["last_request_at"] = time.time()
-        _metrics["last_command"] = command
+        _metrics["last_command"] = display
         _metrics["response_times_ms"].append(elapsed_ms)
         if len(_metrics["response_times_ms"]) > 100:
             _metrics["response_times_ms"].pop(0)
+
+        _task_log.append({
+            "time": time.time(),
+            "command": display,
+            "success": response.get("success", False),
+            "duration_ms": elapsed_ms,
+            "error": response.get("error", ""),
+        })
+        if len(_task_log) > TASK_LOG_SIZE:
+            _task_log.pop(0)
 
         with _responses_lock:
             _responses[req_id] = response
@@ -858,7 +942,8 @@ class MCPStatusWindow:
     FONT = ("Segoe UI", 9)
     FONT_BOLD = ("Segoe UI", 10, "bold")
     FONT_BIG = ("Segoe UI", 12)
-    UPDATE_MS = 1000
+    UPDATE_MS = 200
+    JUST_RAN_WINDOW_SEC = 2.0
 
     def __init__(self) -> None:
         self._thread: Optional[threading.Thread] = None
@@ -869,17 +954,31 @@ class MCPStatusWindow:
         self._client_dot: Optional[tk.Label] = None
         self._client_text: Optional[tk.Label] = None
         self._btn_toggle: Optional[tk.Button] = None
+        self._btn_errors: Optional[tk.Button] = None
+        self._btn_tasks: Optional[tk.Button] = None
+        self._now_dot: Optional[tk.Label] = None
+        self._now_text: Optional[tk.Label] = None
         self._port_var: Optional[tk.StringVar] = None
         self._port_entry: Optional[tk.Entry] = None
+        self._errors_window: Optional[tk.Toplevel] = None
+        self._errors_text: Optional[tk.Text] = None
+        self._errors_shown_count: int = -1
+        self._tasks_window: Optional[tk.Toplevel] = None
+        self._tasks_text: Optional[tk.Text] = None
+        self._tasks_shown_count: int = -1
 
     def start(self) -> None:
         """Open the status window in a background thread."""
         if self._thread and self._thread.is_alive() and self._window is not None:
+            # Window already exists — it may have been hidden via _on_close.
+            # Schedule the re-show on the tkinter thread to be safe.
             try:
-                self._window.lift()
-                self._window.focus_force()
+                self._window.after(0, self.show)
             except Exception:
-                pass
+                try:
+                    self.show()
+                except Exception:
+                    pass
             return
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
@@ -901,17 +1000,22 @@ class MCPStatusWindow:
         window = tk.Toplevel(root)
         self._window = window
         self._labels = {}
-        window.title("You can close this window")
-        window.geometry("260x295")
+        window.title("MCP for UEFN")
+        if os.path.isfile(ICON_PATH):
+            try:
+                self._icon_img = tk.PhotoImage(file=ICON_PATH)
+                window.iconphoto(True, self._icon_img)
+            except Exception:
+                self._icon_img = None
         window.attributes("-topmost", True)
         window.configure(bg=self.BG)
-        window.resizable(False, False)
+        window.resizable(True, True)
 
         # -- Title --
         title_frame = tk.Frame(window, bg=self.BG)
         title_frame.pack(fill="x", padx=12, pady=(10, 2))
         tk.Label(title_frame, text="UEFN MCP Listener", font=self.FONT_BIG, fg=self.FG, bg=self.BG).pack(side="left")
-        tk.Label(title_frame, text=f"v{PROTOCOL_VERSION}", font=self.FONT, fg=self.FG_DIM, bg=self.BG).pack(side="right")
+        tk.Label(title_frame, text=f"v{PROTOCOL_VERSION} {VERSION_SUFFIX}", font=self.FONT, fg=self.FG_DIM, bg=self.BG).pack(side="right")
 
         # -- Status rows --
         hdr = tk.Frame(window, bg=self.BG)
@@ -930,6 +1034,13 @@ class MCPStatusWindow:
         self._client_dot.pack(side="left")
         self._client_text = tk.Label(row2, text="MCP Server: Connecting...", font=self.FONT, fg=self.FG_DIM, bg=self.BG)
         self._client_text.pack(side="left", padx=(4, 0))
+
+        row3 = tk.Frame(hdr, bg=self.BG)
+        row3.pack(fill="x", pady=(2, 0))
+        self._now_dot = tk.Label(row3, text="\u25cb", font=self.FONT, fg=self.FG_DIM, bg=self.BG)
+        self._now_dot.pack(side="left")
+        self._now_text = tk.Label(row3, text="Idle", font=self.FONT, fg=self.FG_DIM, bg=self.BG, anchor="w")
+        self._now_text.pack(side="left", padx=(4, 0), fill="x", expand=True)
 
         tk.Frame(window, bg="#333333", height=1).pack(fill="x", padx=12, pady=4)
 
@@ -977,8 +1088,20 @@ class MCPStatusWindow:
 
         tk.Button(btn_frame, text="Restart", command=self._on_restart, **btn_cfg).pack(side="left", padx=(6, 0))
 
+        self._btn_errors = tk.Button(btn_frame, text="Errors", command=self._on_errors, **btn_cfg)
+        self._btn_errors.pack(side="right")
+
+        self._btn_tasks = tk.Button(btn_frame, text="Tasks", command=self._on_tasks, **btn_cfg)
+        self._btn_tasks.pack(side="right", padx=(0, 6))
+
         self._update()
         window.protocol("WM_DELETE_WINDOW", self._on_close)
+
+        window.update_idletasks()
+        req_w = max(window.winfo_reqwidth(), 320)
+        req_h = max(window.winfo_reqheight(), 300)
+        window.geometry(f"{req_w}x{req_h}")
+        window.minsize(req_w, req_h)
 
     def _update(self) -> None:
         if not self._window:
@@ -1026,6 +1149,42 @@ class MCPStatusWindow:
         if self._client_text:
             self._client_text.configure(text=client_text, fg=client_fg)
 
+        # Now-executing row
+        cur_cmd = _current_task.get("command")
+        cur_start = _current_task.get("start_time") or 0.0
+        q_size = _command_queue.qsize()
+        if self._now_dot and self._now_text:
+            if cur_cmd:
+                elapsed = time.time() - cur_start
+                if elapsed < 60:
+                    elapsed_str = f"{elapsed:.2f}s" if elapsed < 10 else f"{elapsed:.1f}s"
+                else:
+                    elapsed_str = f"{int(elapsed // 60)}m {int(elapsed % 60)}s"
+                queued_str = f"  (+{q_size} queued)" if q_size > 0 else ""
+                self._now_dot.configure(text="\u25cf", fg=self.YELLOW)
+                self._now_text.configure(text=f"Now: {cur_cmd}  {elapsed_str}{queued_str}", fg=self.FG)
+            elif q_size > 0:
+                self._now_dot.configure(text="\u25cb", fg=self.YELLOW)
+                self._now_text.configure(text=f"Queued: {q_size}", fg=self.FG_DIM)
+            elif _task_log:
+                last = _task_log[-1]
+                age = time.time() - last["time"]
+                if age <= self.JUST_RAN_WINDOW_SEC:
+                    ok = last["success"]
+                    color = self.GREEN if ok else self.RED
+                    dur = last["duration_ms"]
+                    self._now_dot.configure(text="\u25cf", fg=color)
+                    self._now_text.configure(
+                        text=f"Just ran: {last['command']}  {dur:.1f} ms",
+                        fg=self.FG,
+                    )
+                else:
+                    self._now_dot.configure(text="\u25cb", fg=self.FG_DIM)
+                    self._now_text.configure(text="Idle", fg=self.FG_DIM)
+            else:
+                self._now_dot.configure(text="\u25cb", fg=self.FG_DIM)
+                self._now_text.configure(text="Idle", fg=self.FG_DIM)
+
         # Port entry: editable when stopped, locked when running
         if self._port_entry:
             if running:
@@ -1072,6 +1231,25 @@ class MCPStatusWindow:
         else:
             self._labels["avg_time"].configure(text="\u2014")
 
+        # Errors button — highlight red if there are any, show count
+        if self._btn_errors:
+            count = len(_error_log)
+            if count > 0:
+                self._btn_errors.configure(text=f"Errors ({count})", fg=self.RED)
+            else:
+                self._btn_errors.configure(text="Errors", fg=self.FG)
+
+        # Tasks button — show total request count
+        if self._btn_tasks:
+            total = _metrics.get("total_requests", 0)
+            self._btn_tasks.configure(text=f"Tasks ({total})" if total else "Tasks")
+
+        # Live-refresh open history windows if new entries arrived
+        if self._errors_window is not None and len(_error_log) != self._errors_shown_count:
+            self._refresh_errors_text()
+        if self._tasks_window is not None and len(_task_log) != self._tasks_shown_count:
+            self._refresh_tasks_text()
+
         self._window.after(self.UPDATE_MS, self._update)
 
     def _on_toggle(self) -> None:
@@ -1088,10 +1266,393 @@ class MCPStatusWindow:
     def _on_restart(self) -> None:
         _run_on_main_thread(restart_listener)
 
+    def _on_errors(self) -> None:
+        """Open (or focus) the errors window."""
+        if self._errors_window is not None:
+            try:
+                self._errors_window.lift()
+                self._errors_window.focus_force()
+                return
+            except Exception:
+                self._errors_window = None
+
+        if self._window is None:
+            return
+
+        win = tk.Toplevel(self._window)
+        self._errors_window = win
+        win.title("UEFN MCP — Errors")
+        win.geometry("720x420")
+        win.minsize(400, 200)
+        win.configure(bg=self.BG)
+
+        toolbar = tk.Frame(win, bg=self.BG)
+        toolbar.pack(fill="x", padx=8, pady=(8, 4))
+        btn_cfg = dict(bg="#3c3c3c", fg=self.FG, activebackground="#4a4a4a",
+                       activeforeground=self.FG, relief="flat", font=self.FONT,
+                       padx=10, pady=2, cursor="hand2")
+        tk.Button(toolbar, text="Clear", command=self._on_errors_clear, **btn_cfg).pack(side="left")
+        tk.Button(toolbar, text="Copy all", command=self._on_errors_copy, **btn_cfg).pack(side="left", padx=(6, 0))
+        tk.Button(toolbar, text="Close", command=self._on_errors_close, **btn_cfg).pack(side="right")
+
+        body = tk.Frame(win, bg=self.BG)
+        body.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+
+        scrollbar = tk.Scrollbar(body, orient="vertical")
+        scrollbar.pack(side="right", fill="y")
+
+        text = tk.Text(
+            body, wrap="word", font=("Consolas", 9),
+            bg="#1a1a1a", fg=self.FG, insertbackground=self.FG,
+            relief="flat", yscrollcommand=scrollbar.set,
+        )
+        text.tag_configure("header", foreground=self.RED, font=("Consolas", 9, "bold"))
+        text.tag_configure("meta", foreground=self.FG_DIM)
+        text.pack(side="left", fill="both", expand=True)
+        scrollbar.configure(command=text.yview)
+
+        self._errors_text = text
+        self._refresh_errors_text()
+        win.protocol("WM_DELETE_WINDOW", self._on_errors_close)
+
+    def _refresh_errors_text(self) -> None:
+        txt = self._errors_text
+        if txt is None:
+            return
+        txt.configure(state="normal")
+        txt.delete("1.0", "end")
+        if not _error_log:
+            txt.insert("end", "No errors captured yet.\n", ("meta",))
+        else:
+            for i, entry in enumerate(_error_log, 1):
+                ts = time.strftime("%H:%M:%S", time.localtime(entry["time"]))
+                txt.insert("end", f"[{i}] {ts}  {entry['command']}\n", ("header",))
+                txt.insert("end", f"{entry['error']}\n", ())
+                tb = entry.get("traceback", "").rstrip()
+                if tb:
+                    txt.insert("end", f"{tb}\n", ("meta",))
+                txt.insert("end", "\n")
+        txt.configure(state="disabled")
+        txt.see("end")
+        self._errors_shown_count = len(_error_log)
+
+    def _on_errors_clear(self) -> None:
+        _error_log.clear()
+        self._refresh_errors_text()
+
+    def _on_errors_copy(self) -> None:
+        if self._errors_text is None or self._errors_window is None:
+            return
+        try:
+            content = self._errors_text.get("1.0", "end-1c")
+            self._errors_window.clipboard_clear()
+            self._errors_window.clipboard_append(content)
+        except Exception:
+            pass
+
+    def _on_errors_close(self) -> None:
+        if self._errors_window is not None:
+            try:
+                self._errors_window.destroy()
+            except Exception:
+                pass
+            self._errors_window = None
+            self._errors_text = None
+            self._errors_shown_count = -1
+
+    def _on_tasks(self) -> None:
+        """Open (or focus) the tasks history window."""
+        if self._tasks_window is not None:
+            try:
+                self._tasks_window.lift()
+                self._tasks_window.focus_force()
+                return
+            except Exception:
+                self._tasks_window = None
+
+        if self._window is None:
+            return
+
+        win = tk.Toplevel(self._window)
+        self._tasks_window = win
+        win.title("UEFN MCP — Task History")
+        win.geometry("720x420")
+        win.minsize(400, 200)
+        win.configure(bg=self.BG)
+
+        toolbar = tk.Frame(win, bg=self.BG)
+        toolbar.pack(fill="x", padx=8, pady=(8, 4))
+        btn_cfg = dict(bg="#3c3c3c", fg=self.FG, activebackground="#4a4a4a",
+                       activeforeground=self.FG, relief="flat", font=self.FONT,
+                       padx=10, pady=2, cursor="hand2")
+        tk.Button(toolbar, text="Clear", command=self._on_tasks_clear, **btn_cfg).pack(side="left")
+        tk.Button(toolbar, text="Copy all", command=self._on_tasks_copy, **btn_cfg).pack(side="left", padx=(6, 0))
+        self._tasks_summary = tk.Label(
+            toolbar, text="", font=self.FONT, fg=self.FG_DIM, bg=self.BG,
+        )
+        self._tasks_summary.pack(side="left", padx=(12, 0))
+        tk.Button(toolbar, text="Close", command=self._on_tasks_close, **btn_cfg).pack(side="right")
+
+        body = tk.Frame(win, bg=self.BG)
+        body.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+
+        scrollbar = tk.Scrollbar(body, orient="vertical")
+        scrollbar.pack(side="right", fill="y")
+
+        text = tk.Text(
+            body, wrap="none", font=("Consolas", 9),
+            bg="#1a1a1a", fg=self.FG, insertbackground=self.FG,
+            relief="flat", yscrollcommand=scrollbar.set,
+        )
+        text.tag_configure("ok", foreground=self.GREEN)
+        text.tag_configure("fail", foreground=self.RED)
+        text.tag_configure("slow", foreground=self.YELLOW)
+        text.tag_configure("meta", foreground=self.FG_DIM)
+        text.pack(side="left", fill="both", expand=True)
+        scrollbar.configure(command=text.yview)
+
+        self._tasks_text = text
+        self._refresh_tasks_text()
+        win.protocol("WM_DELETE_WINDOW", self._on_tasks_close)
+
+    def _refresh_tasks_text(self) -> None:
+        txt = self._tasks_text
+        if txt is None:
+            return
+        txt.configure(state="normal")
+        txt.delete("1.0", "end")
+        if not _task_log:
+            txt.insert("end", "No tasks executed yet.\n", ("meta",))
+        else:
+            ok_count = sum(1 for e in _task_log if e["success"])
+            fail_count = len(_task_log) - ok_count
+            total_ms = sum(e["duration_ms"] for e in _task_log)
+            avg_ms = total_ms / len(_task_log) if _task_log else 0.0
+            if getattr(self, "_tasks_summary", None) is not None:
+                self._tasks_summary.configure(
+                    text=f"{len(_task_log)} shown  •  {ok_count} ok  •  {fail_count} failed  •  avg {avg_ms:.1f} ms"
+                )
+            for entry in reversed(_task_log):
+                ts = time.strftime("%H:%M:%S", time.localtime(entry["time"]))
+                status = "OK  " if entry["success"] else "FAIL"
+                tag = "ok" if entry["success"] else "fail"
+                dur = entry["duration_ms"]
+                dur_tag = "slow" if dur >= 500 else "meta"
+                txt.insert("end", f"{ts}  ", ("meta",))
+                txt.insert("end", f"{status}  ", (tag,))
+                txt.insert("end", f"{dur:>7.1f} ms  ", (dur_tag,))
+                txt.insert("end", f"{entry['command']}\n", ())
+                if not entry["success"] and entry.get("error"):
+                    txt.insert("end", f"             {entry['error']}\n", ("fail",))
+        txt.configure(state="disabled")
+        self._tasks_shown_count = len(_task_log)
+
+    def _on_tasks_clear(self) -> None:
+        _task_log.clear()
+        self._refresh_tasks_text()
+
+    def _on_tasks_copy(self) -> None:
+        if self._tasks_text is None or self._tasks_window is None:
+            return
+        try:
+            content = self._tasks_text.get("1.0", "end-1c")
+            self._tasks_window.clipboard_clear()
+            self._tasks_window.clipboard_append(content)
+        except Exception:
+            pass
+
+    def _on_tasks_close(self) -> None:
+        if self._tasks_window is not None:
+            try:
+                self._tasks_window.destroy()
+            except Exception:
+                pass
+            self._tasks_window = None
+            self._tasks_text = None
+            self._tasks_shown_count = -1
+
     def _on_close(self) -> None:
+        """Hide the status window to the background instead of closing it.
+
+        The listener keeps running; the window is only withdrawn. Re-open it by
+        calling start_listener() / status_window.start() again (which deiconifies
+        and re-focuses the existing window).
+        """
+        # Close the child windows (errors/tasks) so we don't leak them, but
+        # keep the main window alive — just hidden.
+        self._on_errors_close()
+        self._on_tasks_close()
         if self._window:
-            self._window.destroy()
-            self._window = None
+            try:
+                self._window.withdraw()
+            except Exception:
+                pass
+
+    def show(self) -> None:
+        """Re-show the status window after it was hidden via _on_close."""
+        if self._window is None:
+            return
+        try:
+            self._window.deiconify()
+            self._window.lift()
+            self._window.focus_force()
+        except Exception:
+            pass
+
+    def hide(self) -> None:
+        """Withdraw the status window (same as pressing the window's X)."""
+        if self._window is None:
+            return
+        try:
+            self._window.withdraw()
+        except Exception:
+            pass
+
+
+# ---------------------------------------------------------------------------
+# System-tray icon (pystray)
+# ---------------------------------------------------------------------------
+
+
+def _show_status_window() -> None:
+    """Show the status window, (re)creating it if it was fully closed.
+
+    Safe to call from any thread — window mutation is marshalled onto the
+    tkinter thread by MCPStatusWindow.start()/show().
+    """
+    win = unreal._mcp_status_window
+    if win is not None and win.is_alive() and getattr(win, "_window", None) is not None:
+        win.start()  # reuses + deiconifies the existing window
+    else:
+        unreal._mcp_status_window = MCPStatusWindow()
+        unreal._mcp_status_window.start()
+
+
+class MCPTrayIcon:
+    """Real Windows system-tray icon for the MCP listener.
+
+    Runs the pystray event loop on its own daemon thread. Menu actions fire on
+    that pystray thread, so anything touching tkinter is marshalled via
+    ``window.after(...)`` and anything touching the UE API via
+    ``_run_on_main_thread(...)``.
+    """
+
+    def __init__(self) -> None:
+        self._icon: Optional["pystray.Icon"] = None
+        self._thread: Optional[threading.Thread] = None
+
+    def is_alive(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
+    def start(self) -> None:
+        if not _TRAY_AVAILABLE:
+            return
+        if self.is_alive() and self._icon is not None:
+            return
+        try:
+            image = PIL_Image.open(ICON_PATH)
+        except Exception as e:
+            _log(f"Tray icon image load failed: {e}", "warning")
+            return
+
+        menu = pystray.Menu(
+            pystray.MenuItem("Show window", self._on_show, default=True),
+            pystray.MenuItem("Hide window", self._on_hide),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem("Restart listener", self._on_restart),
+            pystray.MenuItem(self._toggle_label, self._on_toggle),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem("Quit (stop & remove tray)", self._on_quit),
+        )
+        self._icon = pystray.Icon(
+            "uefn_mcp",
+            icon=image,
+            title=self._title(),
+            menu=menu,
+        )
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+        _log("Tray icon started")
+
+    def _run(self) -> None:
+        try:
+            self._icon.run()
+        except Exception as e:
+            _log(f"Tray icon loop crashed: {e}", "warning")
+
+    def stop(self) -> None:
+        icon = self._icon
+        self._icon = None
+        if icon is not None:
+            try:
+                icon.stop()
+            except Exception:
+                pass
+
+    # -- dynamic labels --------------------------------------------------
+    def _title(self) -> str:
+        if unreal._mcp_server is not None:
+            return f"UEFN MCP — running (port {unreal._mcp_bound_port})"
+        return "UEFN MCP — stopped"
+
+    def _toggle_label(self, _item: Any) -> str:
+        return "Stop listener" if unreal._mcp_server is not None else "Start listener"
+
+    def refresh(self) -> None:
+        """Update tray title + menu to reflect the current listener state."""
+        if self._icon is None:
+            return
+        try:
+            self._icon.title = self._title()
+            self._icon.update_menu()
+        except Exception:
+            pass
+
+    # -- menu actions (invoked on the pystray thread) --------------------
+    def _on_show(self, _icon: Any = None, _item: Any = None) -> None:
+        _show_status_window()
+
+    def _on_hide(self, _icon: Any = None, _item: Any = None) -> None:
+        win = unreal._mcp_status_window
+        if win is not None and getattr(win, "_window", None) is not None:
+            try:
+                win._window.after(0, win.hide)
+            except Exception:
+                pass
+
+    def _on_toggle(self, _icon: Any = None, _item: Any = None) -> None:
+        if unreal._mcp_server is not None:
+            _run_on_main_thread(stop_listener)
+        else:
+            _run_on_main_thread(lambda: start_listener(show_status=False))
+        self.refresh()
+
+    def _on_restart(self, _icon: Any = None, _item: Any = None) -> None:
+        _run_on_main_thread(restart_listener)
+        self.refresh()
+
+    def _on_quit(self, _icon: Any = None, _item: Any = None) -> None:
+        # Stop serving and remove the tray icon. The window (if any) is hidden,
+        # not destroyed, so re-running start_listener() restores everything.
+        _run_on_main_thread(stop_listener)
+        win = unreal._mcp_status_window
+        if win is not None and getattr(win, "_window", None) is not None:
+            try:
+                win._window.after(0, win.hide)
+            except Exception:
+                pass
+        self.stop()
+
+
+def _start_tray() -> None:
+    """Create + start the tray icon (once), if pystray is available."""
+    if not _TRAY_AVAILABLE:
+        return
+    tray = unreal._mcp_tray
+    if tray is None:
+        tray = MCPTrayIcon()
+        unreal._mcp_tray = tray
+    tray.start()
 
 
 # ---------------------------------------------------------------------------
@@ -1122,8 +1683,9 @@ def start_listener(port: int = 0, show_status: bool = True) -> int:
     """
     if unreal._mcp_server is not None:
         _log(f"Listener already running on port {unreal._mcp_bound_port}", "warning")
-        if show_status and unreal._mcp_status_window:
-            unreal._mcp_status_window.start()
+        if show_status:
+            _show_status_window()
+        _start_tray()
         return unreal._mcp_bound_port
 
     if port == 0:
@@ -1146,14 +1708,12 @@ def start_listener(port: int = 0, show_status: bool = True) -> int:
     _log(f"Registered {len(_HANDLERS)} command handlers")
 
     if show_status:
-        win = unreal._mcp_status_window
-        # Reuse only if thread alive AND window visible
-        if win is not None and win.is_alive() and getattr(win, "_window", None) is not None:
-            win.start()
-        else:
-            # Create fresh window
-            unreal._mcp_status_window = MCPStatusWindow()
-            unreal._mcp_status_window.start()
+        _show_status_window()
+
+    # Real system-tray icon (persists for the editor session).
+    _start_tray()
+    if unreal._mcp_tray is not None:
+        unreal._mcp_tray.refresh()
 
     return port
 
@@ -1175,10 +1735,19 @@ def stop_listener() -> None:
     _metrics["started_at"] = 0.0
     _metrics["last_client_ping"] = 0.0
 
+    if unreal._mcp_tray is not None:
+        unreal._mcp_tray.refresh()
+
 
 def cleanup() -> None:
-    """Full cleanup: stop listener AND unregister tick callback."""
+    """Full cleanup: stop listener, remove tray icon AND unregister tick callback."""
     stop_listener()
+    if unreal._mcp_tray is not None:
+        try:
+            unreal._mcp_tray.stop()
+        except Exception:
+            pass
+        unreal._mcp_tray = None
     if unreal._mcp_tick_handle is not None:
         unreal.unregister_slate_post_tick_callback(unreal._mcp_tick_handle)
         unreal._mcp_tick_handle = None
@@ -1212,6 +1781,15 @@ try:
     if _old_tick is not None:
         unreal.unregister_slate_post_tick_callback(_old_tick)
         unreal._mcp_tick_handle = None
+
+    # Remove any old tray icon so start_listener recreates one bound to the
+    # freshly-loaded code (avoids a stale duplicate icon after a re-run).
+    if unreal._mcp_tray is not None:
+        try:
+            unreal._mcp_tray.stop()
+        except Exception:
+            pass
+        unreal._mcp_tray = None
 
     # NEVER touch the old tkinter window — two tk.Tk() crashes tcl.
     # If the old window is still alive, start_listener will reuse it.

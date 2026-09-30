@@ -9,3 +9,6 @@ build/
 .venv/
 venv/
 .env
+
+# Vendored tray deps (pystray + Pillow) — reinstall locally, see README.
+vendor/
