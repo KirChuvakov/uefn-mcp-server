@@ -8,7 +8,8 @@ where editor Python cannot reach:
 - **Launch Session** / **Push Changes** (no Python API; `verse_push` covers Push Verse Changes while a session runs);
 - **modal dialogs** that block the editor (for example "Overwrite Existing Object", which makes `verse_compile` return
   `ok: false` with no build activity);
-- the **Fortnite client** during a play session (captures at fixed moments for 1:1 references).
+- the **Fortnite client** during a play session, **screenshots only** (captures at fixed moments for 1:1 references):
+  it runs under anti-cheat and gets no desktop input by default (see Safety rails).
 
 Everything that editor Python can do stays with `execute_python` and the structured editor tools: they are faster,
 deterministic and work while the UEFN window is in the background. The desktop tools run inside the MCP server process
@@ -18,7 +19,7 @@ deterministic and work while the UEFN window is in the background. The desktop t
 
 | Session | Use |
 |---|---|
-| Claude Code inside the **Claude Desktop app** with computer use turned on (Settings > General > Computer use; Pro or Max plan) | The official `mcp__computer-use__*` tools. Call `request_access` for the UEFN editor, the Fortnite client and the crash reporter first; approval is per app and per session; browsers are view-only, terminals and IDEs click-only, other apps full control. |
+| Claude Code inside the **Claude Desktop app** with computer use turned on (Settings > General > Computer use; Pro or Max plan) | The official `mcp__computer-use__*` tools. Call `request_access` for the UEFN editor and the crash reporter first; approval is per app and per session; browsers are view-only, terminals and IDEs click-only, other apps full control. The Fortnite client: look only, never click or type into it (anti-cheat, see Safety rails). |
 | Claude Code **CLI** on Windows (terminal), background agents, teammates' machines | This server's `desktop_*` tools. The CLI's own computer-use server is macOS-only. |
 
 The recipes below are the same for both. **One driver at a time**: one agent drives a given UEFN editor (desktop input
@@ -49,30 +50,39 @@ machine for something else unless they asked for it.
 Input tools (click, move, drag, scroll, type, key) and the other acting tools (focus, close, launch) obey:
 
 1. **Allowlist of target processes.** Default: `UnrealEditorFortnite-Win64-Shipping` (the editor, including its HUB),
-   `CrashReportClientEditor*`, `EpicGamesLauncher`, `FortniteClient-Win64-Shipping*`, `FortniteLauncher`. Names are
-   matched case-insensitively without `.exe`; `*` / `?` are globs. `UEFN_DESKTOP_ALLOW` replaces the list
+   `CrashReportClientEditor*`, `EpicGamesLauncher`. Names are matched case-insensitively without `.exe`; `*` / `?` are
+   globs. `UEFN_DESKTOP_ALLOW` replaces the list
    (`UEFN_DESKTOP_ALLOW=UnrealEditorFortnite-Win64-Shipping,CrashReportClientEditor*`); a leading `+` extends it
    (`+CrashReportClient` adds the Fortnite client's crash reporter); `*` alone disables the check, which is
-   **dangerous**: any window, including a terminal or a browser, can then receive input. Set it in the `env` of the
-   `uefn` server in `.mcp.json`.
-2. **Named target, focused, re-checked.** Every input call names its target (`process` / `title`, else the
+   **dangerous**: any other window, including a terminal or a browser, can then receive input. Set it in the `env` of
+   the `uefn` server in `.mcp.json`.
+2. **The Fortnite game client gets no input (screenshots only).** `FortniteClient-Win64-Shipping*` (with its
+   anti-cheat variants `_EAC`, `_EAC_EOS`, `_BE`) and `FortniteLauncher` run under anti-cheat, and synthetic input
+   (clicks, keys, even the focus workaround's ALT tap) can count as automation under Epic's terms of service: **the
+   account is at risk**. They are not in the default list, and neither `*` nor a broad glob such as `Fortnite*` lets
+   input through: only an entry that names them does. **Warning:** opt in only when the owner explicitly accepts that
+   risk, with `UEFN_DESKTOP_ALLOW=+FortniteClient-Win64-Shipping` (the exact game process; add `*` to the name to cover
+   the anti-cheat variants, or `+FortniteLauncher`). While it is set, `desktop_list_windows` reports it under
+   `allowlist_warnings` and the audit log marks every call that targets the client with `protected_target`.
+   Screenshots and window lists of the client never need it.
+3. **Named target, focused, re-checked.** Every input call names its target (`process` / `title`, else the
    screenshot's window, else the window under the point, else the foreground window), brings it to the foreground and
    checks, right before each input batch, that the foreground window belongs to an allowed process and to the target's
    process. Clicks also check the window under the point. Anything else is refused with a clear error; nothing is sent.
-3. **Kill switch.** If the mouse cursor is within 5 px of the top-left corner of any monitor when an acting call
+4. **Kill switch.** If the mouse cursor is within 5 px of the top-left corner of any monitor when an acting call
    starts, the call is refused. To stop a runaway agent, park the mouse in a top-left corner and leave it there; every
    later call is refused until it moves away. Drags and typing re-check between steps; points inside that corner are
    never clicked.
-4. **UIPI.** A target running elevated would silently drop injected input; such targets are refused.
-5. **Editor-quitting guards.** `desktop_close_window` refuses a top-level UEFN editor window unless
+5. **UIPI.** A target running elevated would silently drop injected input; such targets are refused.
+6. **Editor-quitting guards.** `desktop_close_window` refuses a top-level UEFN editor window unless
    `allow_editor_main=true`, and `desktop_key` refuses `alt+f4` on UEFN unless `allow_editor_close=true`: pass them only
    when the owner asked to close the editor. Never kill a healthy editor (unsaved scene work is lost).
-6. **Audit log.** One JSON line per acting call (time, tool, outcome ok / refused / error, target process and title,
+7. **Audit log.** One JSON line per acting call (time, tool, outcome ok / refused / error, target process and title,
    coordinates or keys, the cursor at start, duration) in `%TEMP%\uefn-mcp\desktop_control.log` (rotating, 1 MB x 4;
    `UEFN_DESKTOP_LOG` overrides). Typed text is logged only when it does not look sensitive: it is redacted to its
    length for `sensitive=true`, for Win32 password controls, for sign-in / password windows, for the Epic launcher and
    for secret-looking strings.
-7. `UEFN_DESKTOP_DISABLE=1` turns every acting call off.
+8. `UEFN_DESKTOP_DISABLE=1` turns every acting call off.
 
 **Focus.** Windows only lets the process that received the last input take the foreground (the foreground lock), and
 the MCP server never receives input. `desktop_focus_window` (and every input tool before sending) therefore tries, in
@@ -181,13 +191,14 @@ uefn_launch_project(project="C:/.../MyIsland.uefnproject")    # or the folder, o
 
 ```
 desktop_wait_for_window(process="FortniteClient-Win64-Shipping*", timeout_sec=180)
-desktop_focus_window(process="FortniteClient-Win64-Shipping*")
 desktop_screenshot(process="FortniteClient-Win64-Shipping*", full_resolution=true, count=6, interval_sec=5,
                    output_path="<refs folder>/lobby.png")          # lobby_001.png ... lobby_006.png
 ```
 
-Captures read the screen, so the client must be visible and in windowed or borderless mode (exclusive fullscreen can
-capture black). In gameplay the client clips the cursor; menus accept clicks.
+Screenshots only: no focus, click or key goes to the client (anti-cheat; Safety rails, item 2). Captures read the
+screen, so the client must be visible, in front (Launch Session normally brings it up; if it is covered or minimized,
+ask the owner to click it) and in windowed or borderless mode (exclusive fullscreen can capture black). Whatever the
+session needs to do in the game, the owner plays it.
 
 ### Answer a modal dialog
 
@@ -199,7 +210,7 @@ click the right button, or `desktop_key(keys="esc")` / `"enter"`.
 
 | Command | What it does |
 |---|---|
-| `python tests/test_desktop_control_offline.py` | Key names and combos, allowlist parsing and matching, coordinate mapping with synthetic layouts (negative origins, 125 % / 150 %), SendInput normalization, kill switch, redaction, PNG encoder, audit log |
+| `python tests/test_desktop_control_offline.py` | Key names and combos, allowlist parsing and matching (the Fortnite client only through an explicit opt-in, never through `*` or `Fortnite*`), coordinate mapping with synthetic layouts (negative origins, 125 % / 150 %), SendInput normalization, kill switch, redaction, PNG encoder, audit log |
 | `python tests/test_desktop_control_offline.py --live` | + read-only live smoke: monitors vs `mss`, windows, cursor, monitor-1 screenshots. Sends no input |
 | `python tests/test_uefn_session_offline.py` | INI editing (byte-exact), log state machine, state classification, install discovery, hook check |
 | `python tests/test_desktop_input_live.py --yes-send-input` | **Moves the mouse and types**, only into its own sandbox Tk window (allowlist narrowed to that interpreter): exact click pixel, double click, drag, wheel, Unicode typing, combos, click in screenshot pixels, allowlist refusal, kill switch, WM_CLOSE. Run when nobody uses the machine |

@@ -5,15 +5,16 @@ Release versions of the repo. The listener also reports a protocol version in `p
 
 ## 0.5.0 (unreleased)
 
-121 MCP tools (14 new), all host-side: they run in the MCP server process and need neither UEFN nor the listener.
-Listener protocol unchanged (0.3.2).
+121 MCP tools (14 new, all host-side: they run in the MCP server process and need neither UEFN nor the listener).
+Listener protocol 0.3.3 (was 0.3.2): rotation parameters take named axes and the static-mesh handlers changed (see
+Fixed).
 
 ### Added — desktop control (`desktop_control.py`, 11 tools, Windows, pure `ctypes`)
 
 - `desktop_list_windows`, `desktop_screenshot`, `desktop_focus_window`, `desktop_click`, `desktop_move`,
   `desktop_drag`, `desktop_scroll`, `desktop_type`, `desktop_key`, `desktop_close_window`, `desktop_wait_for_window`:
-  for UI that editor Python cannot reach (crash report dialog, the HUB, Launch Session, modal dialogs, the Fortnite
-  client).
+  for UI that editor Python cannot reach (crash report dialog, the HUB, Launch Session, modal dialogs) and screenshots
+  of the Fortnite client.
 - The server process becomes per-monitor DPI aware (V2) at import: every coordinate is a physical pixel of the virtual
   desktop (negative origins included), matching `mss` / GDI captures. Screenshots are GDI captures written as PNG with
   `zlib` (no `mss` needed), downscaled for the model by default, with a pixel mapping returned and stored next to the
@@ -22,8 +23,8 @@ Listener protocol unchanged (0.3.2).
   Unicode typing (`KEYEVENTF_UNICODE`), virtual keys with scan codes and extended flags from an explicit key-name table.
   Focus with the foreground-lock workarounds (`SetForegroundWindow`, `AttachThreadInput`, `SwitchToThisWindow`, ALT
   tap), verified afterwards.
-- Safety rails: process allowlist (UEFN editor, `CrashReportClientEditor*`, `EpicGamesLauncher`,
-  `FortniteClient-Win64-Shipping*`, `FortniteLauncher`; `UEFN_DESKTOP_ALLOW` replaces / `+` extends / `*` disables);
+- Safety rails: process allowlist (UEFN editor, `CrashReportClientEditor*`, `EpicGamesLauncher`; `UEFN_DESKTOP_ALLOW`
+  replaces / `+` extends / `*` disables; the Fortnite game client only through an explicit opt-in, see Fixed);
   every input call resolves and focuses its target and re-checks the foreground right before sending; clicks check the
   window under the point; kill switch (cursor within 5 px of a monitor's top-left corner); elevated targets refused
   (UIPI); closing the UEFN editor window (`WM_CLOSE`, `alt+f4`) needs an explicit flag; `UEFN_DESKTOP_DISABLE`; JSON-lines
@@ -52,18 +53,59 @@ Listener protocol unchanged (0.3.2).
   hook), `-WithTray`, `-WithMss`, `-EnableLoadLastProject` (opt-in), `-RegisterClaude`, and what is left to do.
 - `uefn_session.py` doubles as a CLI (`status`, `find-install`, `set-load-on-startup`) used by `setup.ps1`.
 
+### Fixed — safety
+
+- **Rotation axis order.** `unreal.Rotator`'s Python constructor is `Rotator(roll, pitch, yaw)`. `spawn_actor`,
+  `set_actor_transform`, `set_viewport_camera`, `niagara_place_actor` and the `device_set_editable` rotator path passed
+  the documented `[pitch, yaw, roll]` list positionally, so UEFN applied `[roll, pitch, yaw]` with no error (the
+  `{pitch, yaw, roll}` dict of `device_set_editable` was swapped the same way), and `focus_selected` looked up at the
+  sky (pitch 45, roll -35) instead of at the selection. Rotations are now named axes `{"pitch", "yaw", "roll"}` in
+  degrees (a `Rotation` schema with `additionalProperties: false`; missing axes are 0), every `unreal.Rotator` is built
+  with keywords, and a list is accepted only when its three values are equal: any other list is refused with both of
+  its readings spelled out. `staticmesh_generate_uv` passed `Vector2D` for all gizmo arguments; it now takes
+  `position` [x, y, z] (default: bounds center), a named-axes `orientation`, `tiling` [u, v] and, for box, a new
+  `size` [x, y, z] (default: bounds size).
+- **Static-mesh getters that crash UEFN 42.20.** `staticmesh_get_info`, `staticmesh_enable_nanite`,
+  `staticmesh_remove_lods` and `staticmesh_remove_collisions` called `StaticMeshEditorSubsystem` metadata getters
+  (`has_vertex_colors`, `get_lod_count`, `get_number_verts`, `get_nanite_settings`, ...); a probe of those getters
+  killed UEFN 42.20 (EXCEPTION_ACCESS_VIOLATION, 2026-09-30). The tools now read asset-registry tags,
+  `static_materials`, `get_bounding_box()` and the `nanite_settings` property only; `simple_collision_count`,
+  `convex_collision_count`, `has_vertex_colors`, `lod_screen_sizes` and the read-back counts of the two remove tools
+  say "not available safely in UEFN 42.20". `staticmesh_get_info` adds `triangles_lod0`, `materials`,
+  `collision_prims`, `bounds`, `registry` and `read_errors`; `staticmesh_enable_nanite` keeps the mesh's other Nanite
+  settings.
+- **Fortnite client out of the default input allowlist.** Synthetic input into the anti-cheat-protected game client
+  can count as automation under Epic's terms and risks the account. `FortniteClient-Win64-Shipping*` and
+  `FortniteLauncher` are no longer allowed by default, and neither `*` nor a broad glob such as `Fortnite*` reaches them;
+  only an entry that names them does (`UEFN_DESKTOP_ALLOW=+FortniteClient-Win64-Shipping`, the owner's opt-in), which
+  `desktop_list_windows` reports under `allowlist_warnings` and the audit log marks as `protected_target`. Screenshots
+  and window lists of the client are unchanged; refusals explain the risk and the opt-in.
+- **Mixed versions.** The listener with these fixes reports protocol 0.3.3. The MCP server reads the version from
+  `GET /` and does not send a rotation, `focus_selected` or a `staticmesh_*` command to an older listener (which would
+  swap the axes or call the crashing getters): it asks to reload `uefn_listener.py` and sends nothing.
+
 ### Tests and docs
 
 - `tests/test_desktop_control_offline.py` (+ `--live` read-only smoke), `tests/test_uefn_session_offline.py`,
   `tests/test_desktop_input_live.py` (opt-in, sandbox window only); `tests/test_mcp_server_offline.py` expects 121
-  tools including every new one.
+  tools including every new one and named-axes rotation schemas.
+- Safety fixes: `tests/test_rotation_offline.py` (AST scan for keyword-built rotators, `_parse_rotation`, the rotation
+  handlers against a fake `unreal` with the real `Rotator` signature, server schemas and the listener-version guard),
+  `tests/test_staticmesh_safety_offline.py` (AST scan: no crash-list getter anywhere in the listener; the
+  `staticmesh_*` handlers against a fake `unreal` whose crashing getters raise), the Fortnite opt-in cases in
+  `tests/test_desktop_control_offline.py`; helper `tests/_listener_ast.py` compiles listener functions without
+  `unreal`. `tests/test_safety_fixes_live.py` is written but has not run (see below).
 - `docs/desktop_control.md` (rails, coordinates, UEFN facts, recipes, pending live tests); README, `docs/setup.md`,
-  `docs/tools_reference.md`, `docs/architecture.md`, `docs/troubleshooting.md` updated.
+  `docs/tools_reference.md` ("Conventions (0.5.0)": rotations, crash-safe static-mesh reads), `docs/architecture.md`,
+  `docs/troubleshooting.md`, `docs/uefn_python_capabilities.md` updated.
 
 ### Pending live verification
 
 The HUB flow, `LastProjectFileName` retargeting, closing a real crash dialog and the input path were not exercised
-against UEFN (another agent was driving the editor); see `docs/desktop_control.md`, "Pending live tests".
+against UEFN (another agent was driving the editor); see `docs/desktop_control.md`, "Pending live tests". The safety
+fixes were verified offline only: `python tests/test_safety_fixes_live.py --yes-touch-editor [--camera]` (scratch
+level, spawns and deletes a test cube, never saves) checks the rotation axes, `focus_selected`, the ambiguous-list
+refusal and the static-mesh reads in UEFN; `staticmesh_generate_uv` with the new gizmo arguments is untested in UEFN.
 
 ## 0.4.0 — 2026-09-30
 

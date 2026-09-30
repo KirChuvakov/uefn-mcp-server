@@ -56,7 +56,7 @@ starts Python, so the listener cannot autostart there.
 3. A **status window** will appear:
 
 ```
-UEFN MCP Listener  v0.3.2
+UEFN MCP Listener  v0.3.3
 ● Listener: Running
 ● MCP Server: Connecting...
 

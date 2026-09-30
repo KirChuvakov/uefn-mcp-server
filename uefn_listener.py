@@ -12,6 +12,7 @@ Or auto-start via init_unreal.py.
 import atexit
 import io
 import json
+import math
 import os
 import queue
 import re
@@ -30,7 +31,8 @@ import unreal
 # Configuration
 # ---------------------------------------------------------------------------
 
-PROTOCOL_VERSION = "0.3.2"
+# 0.3.3: rotations take named axes; static-mesh tools use crash-safe reads only (0.5.0 safety fixes).
+PROTOCOL_VERSION = "0.3.3"
 VERSION_SUFFIX = "by Romasno"
 
 try:
@@ -220,6 +222,69 @@ def _serialize_actor(actor: unreal.Actor) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Rotation convention
+# ---------------------------------------------------------------------------
+# The Python constructor is unreal.Rotator(roll=0.0, pitch=0.0, yaw=0.0): positional arguments
+# are (roll, pitch, yaw) (UE Python stub; the struct's native make function is
+# MakeRotator(Roll, Pitch, Yaw)). Before 0.5.0 the tools documented rotation lists as
+# [pitch, yaw, roll] but passed them positionally, so UEFN applied them as [roll, pitch, yaw]
+# without any error. Every rotation parameter now takes named axes and every Rotator is built
+# with keywords (tests/test_rotation_offline.py checks both).
+
+ROTATION_AXES = ("pitch", "yaw", "roll")
+
+
+def _finite_number(value: Any, label: str) -> float:
+    """A finite int/float (bool and numeric strings are refused)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{label}: expected a number, got {value!r}")
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError(f"{label}: expected a finite number, got {value!r}")
+    return number
+
+
+def _parse_rotation(value: Any, name: str = "rotation") -> Dict[str, float]:
+    """Normalize a rotation parameter to {"pitch", "yaw", "roll"} in degrees.
+
+    Accepted: a dict with any of the keys pitch / yaw / roll (missing axes are 0), or a list of
+    three EQUAL numbers such as [0, 0, 0] (the only lists both readings agree on). Any other
+    list is refused as ambiguous: the tools documented [pitch, yaw, roll] but applied it as
+    [roll, pitch, yaw] until 0.5.0.
+    """
+    if isinstance(value, dict):
+        unknown = sorted(str(k) for k in value if k not in ROTATION_AXES)
+        if unknown:
+            raise ValueError(f"{name}: unknown key(s) {unknown}; use pitch, yaw, roll (degrees)")
+        return {axis: _finite_number(value.get(axis, 0.0), f"{name}.{axis}") for axis in ROTATION_AXES}
+    if isinstance(value, (list, tuple)):
+        if len(value) != 3:
+            raise ValueError(f'{name}: expected named axes {{"pitch", "yaw", "roll"}}, got a list of {len(value)}')
+        a, b, c = (_finite_number(v, f"{name}[{i}]") for i, v in enumerate(value))
+        if a == b == c:
+            return {"pitch": a, "yaw": a, "roll": a}
+        raise ValueError(
+            f"{name}: the list {list(value)} is ambiguous. Rotation lists were documented as [pitch, yaw, roll] "
+            "but applied as [roll, pitch, yaw] before 0.5.0. Pass named axes: "
+            f'{{"pitch": {a:g}, "yaw": {b:g}, "roll": {c:g}}} for [pitch, yaw, roll], or '
+            f'{{"pitch": {b:g}, "yaw": {c:g}, "roll": {a:g}}} for what the old tools did.')
+    raise ValueError(f'{name}: expected named axes {{"pitch", "yaw", "roll"}} in degrees, got {type(value).__name__}')
+
+
+def _make_rotator(value: Any, name: str = "rotation") -> "unreal.Rotator":
+    """unreal.Rotator from a rotation parameter, always built with keywords."""
+    r = _parse_rotation(value, name)
+    return unreal.Rotator(roll=r["roll"], pitch=r["pitch"], yaw=r["yaw"])
+
+
+def _float_list(value: Any, size: int, name: str) -> List[float]:
+    """A list of `size` finite numbers (a position, a size, a tiling)."""
+    if not isinstance(value, (list, tuple)) or len(value) != size:
+        raise ValueError(f"{name}: expected a list of {size} numbers, got {value!r}")
+    return [_finite_number(v, f"{name}[{i}]") for i, v in enumerate(value)]
+
+
+# ---------------------------------------------------------------------------
 # Command handlers
 # ---------------------------------------------------------------------------
 
@@ -391,10 +456,11 @@ def _cmd_spawn_actor(
     asset_path: str = "",
     actor_class: str = "",
     location: Optional[List[float]] = None,
-    rotation: Optional[List[float]] = None,
+    rotation: Any = None,
 ) -> dict:
+    """rotation: named axes {"pitch", "yaw", "roll"} in degrees (see _parse_rotation)."""
     loc = unreal.Vector(*location) if location else unreal.Vector(0, 0, 0)
-    rot = unreal.Rotator(*rotation) if rotation else unreal.Rotator(0, 0, 0)
+    rot = _make_rotator(rotation) if rotation is not None else unreal.Rotator(roll=0.0, pitch=0.0, yaw=0.0)
 
     if asset_path:
         asset = unreal.EditorAssetLibrary.load_asset(asset_path)
@@ -432,9 +498,11 @@ def _cmd_delete_actors(actor_paths: List[str]) -> dict:
 def _cmd_set_actor_transform(
     actor_path: str,
     location: Optional[List[float]] = None,
-    rotation: Optional[List[float]] = None,
+    rotation: Any = None,
     scale: Optional[List[float]] = None,
 ) -> dict:
+    """rotation: named axes {"pitch", "yaw", "roll"} in degrees (see _parse_rotation)."""
+    rot = _make_rotator(rotation) if rotation is not None else None  # validate before touching the actor
     actor_sub = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
     all_actors = actor_sub.get_all_level_actors()
     target = None
@@ -447,8 +515,8 @@ def _cmd_set_actor_transform(
 
     if location is not None:
         target.set_actor_location(unreal.Vector(*location), False, False)
-    if rotation is not None:
-        target.set_actor_rotation(unreal.Rotator(*rotation), False)
+    if rot is not None:
+        target.set_actor_rotation(rot, False)
     if scale is not None:
         target.set_actor_scale3d(unreal.Vector(*scale))
     return {"actor": _serialize_actor(target)}
@@ -550,12 +618,14 @@ def _cmd_focus_selected() -> dict:
     )
     cam_dist = spread * 1.5
     cam_loc = unreal.Vector(center_x - cam_dist * 0.5, center_y - cam_dist * 0.5, center_z + cam_dist * 0.5)
-    cam_rot = unreal.Rotator(-35, 45, 0)
+    # Look from (-x, -y, +z) back at the center: yaw 45, pitch -35 (keywords: positional is roll, pitch, yaw).
+    cam_rot = unreal.Rotator(roll=0.0, pitch=-35.0, yaw=45.0)
 
     unreal.EditorLevelLibrary.set_level_viewport_camera_info(cam_loc, cam_rot)
     return {
         "center": {"x": center_x, "y": center_y, "z": center_z},
         "camera": _serialize(cam_loc),
+        "rotation": _serialize(cam_rot),
         "actors_count": len(selected),
     }
 
@@ -731,11 +801,13 @@ def _cmd_get_viewport_camera() -> dict:
 @_register("set_viewport_camera")
 def _cmd_set_viewport_camera(
     location: Optional[List[float]] = None,
-    rotation: Optional[List[float]] = None,
+    rotation: Any = None,
 ) -> dict:
+    """rotation: named axes {"pitch", "yaw", "roll"} in degrees (see _parse_rotation)."""
+    new_rot = _make_rotator(rotation) if rotation is not None else None
     cur_loc, cur_rot = unreal.EditorLevelLibrary.get_level_viewport_camera_info()
     loc = unreal.Vector(*location) if location else cur_loc
-    rot = unreal.Rotator(*rotation) if rotation else cur_rot
+    rot = new_rot if new_rot is not None else cur_rot
     unreal.EditorLevelLibrary.set_level_viewport_camera_info(loc, rot)
     return {"location": _serialize(loc), "rotation": _serialize(rot)}
 
@@ -1065,12 +1137,13 @@ def _resolve_niagara_system(system_path: str) -> "unreal.NiagaraSystem":
 def _cmd_niagara_place_actor(
     system_path: str,
     location: Optional[List[float]] = None,
-    rotation: Optional[List[float]] = None,
+    rotation: Any = None,
     label: str = "",
 ) -> dict:
+    """rotation: named axes {"pitch", "yaw", "roll"} in degrees (see _parse_rotation)."""
+    rot = _make_rotator(rotation) if rotation is not None else unreal.Rotator(roll=0.0, pitch=0.0, yaw=0.0)
     system = _resolve_niagara_system(system_path)
     loc = unreal.Vector(*location) if location else unreal.Vector(0, 0, 0)
-    rot = unreal.Rotator(*rotation) if rotation else unreal.Rotator(0, 0, 0)
     actor_sub = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
     actor = actor_sub.spawn_actor_from_class(unreal.NiagaraActor, loc, rot)
     if actor is None:
@@ -1084,6 +1157,7 @@ def _cmd_niagara_place_actor(
         "label": actor.get_actor_label(),
         "system_path": system.get_path_name(),
         "location": _serialize(loc),
+        "rotation": _serialize(actor.get_actor_rotation()),
     }
 
 
@@ -1365,6 +1439,27 @@ def _cmd_anim_create_montage(source_animation_path: str, asset_path: str) -> dic
 
 
 # -- Static Mesh tools ------------------------------------------------------
+#
+# UEFN 42.20 (2026-09-30) died with EXCEPTION_ACCESS_VIOLATION (reading 0x18 in the Engine DLL) on
+# ONE read-only probe of a project mesh that called the StaticMeshEditorSubsystem metadata getters
+# get_lod_count / get_number_verts / get_number_materials / get_simple_collision_count /
+# get_collision_complexity / get_convex_collision_count / get_lod_screen_sizes / get_nanite_settings /
+# has_vertex_colors / get_num_uv_channels, StaticMesh.get_num_triangles / get_num_sections and
+# BodySetup.agg_geom.export_text(). Which one crashed is unknown (likeliest has_vertex_colors: it
+# dereferences a source-model mesh description without a null check), so these tools call none of
+# them. Mesh facts come from reads that ran on every mesh of a project without trouble: asset-registry
+# tags, the static_materials and nanite_settings properties and get_bounding_box(). Everything else
+# is reported as STATICMESH_UNSAFE. tests/test_staticmesh_safety_offline.py fails if one of those
+# getters is called anywhere in this file.
+
+STATICMESH_UNSAFE = "not available safely in UEFN 42.20"
+
+# Asset-registry tags of a StaticMesh (UStaticMesh::GetAssetRegistryTags; values are text).
+_STATIC_MESH_TAGS = (
+    "Triangles", "Vertices", "UVChannels", "Materials", "LODs", "MinLOD", "CollisionPrims",
+    "SectionsWithCollision", "DefaultCollision", "CollisionComplexity", "LODGroup", "ApproxSize",
+    "NaniteEnabled", "HasNaniteData", "NaniteTriangles", "NaniteVertices", "NaniteFallbackTriangles",
+)
 
 _COLLISION_SHAPE_MAP = {
     "box": "BOX",
@@ -1389,23 +1484,151 @@ def _resolve_static_mesh(asset_path: str):
     return sm
 
 
+def _tag_text(value: Any) -> Optional[str]:
+    """An asset-registry tag value as text; None when the tag is absent.
+
+    UEFN 42.20 returns a plain string (None or "None" when absent); other builds return a
+    (found, value) pair.
+    """
+    if isinstance(value, tuple):
+        flags = [v for v in value if isinstance(v, bool)]
+        texts = [v for v in value if not isinstance(v, bool)]
+        value = texts[0] if texts and (not flags or flags[0]) else None
+    if value is None:
+        return None
+    text = str(value)
+    return None if text in ("", "None") else text
+
+
+def _tag_int(tags: Dict[str, str], name: str) -> Optional[int]:
+    text = tags.get(name)
+    if text is None:
+        return None
+    try:
+        return int(float(text.replace(",", "").strip()))
+    except ValueError:
+        return None
+
+
+def _tag_bool(tags: Dict[str, str], name: str) -> Optional[bool]:
+    text = (tags.get(name) or "").strip().lower()
+    if text in ("true", "1", "yes"):
+        return True
+    if text in ("false", "0", "no"):
+        return False
+    return None
+
+
+def _registry_tags(asset_path: str, names) -> Dict[str, str]:
+    """The named asset-registry tags of an asset (only the ones present), as text."""
+    data = unreal.EditorAssetLibrary.find_asset_data(asset_path)
+    if data is None:
+        return {}
+    try:
+        if not data.is_valid():
+            return {}
+    except Exception:
+        pass
+    out: Dict[str, str] = {}
+    for name in names:
+        try:
+            raw = unreal.AssetRegistryHelpers.get_tag_value(data, name)
+        except Exception:
+            try:
+                raw = data.get_tag_value(name)
+            except Exception:
+                raw = None
+        text = _tag_text(raw)
+        if text is not None:
+            out[name] = text
+    return out
+
+
+def _static_mesh_slots(sm) -> List[Dict[str, Any]]:
+    """Material slots from the static_materials property."""
+    slots = []
+    for i, item in enumerate(sm.get_editor_property("static_materials") or []):
+        mat = item.get_editor_property("material_interface")
+        slots.append({
+            "index": i,
+            "slot": str(item.get_editor_property("material_slot_name")),
+            "material": mat.get_path_name() if mat is not None else None,
+        })
+    return slots
+
+
+def _static_mesh_bounds(sm) -> Dict[str, Any]:
+    """Local-space bounds (cm, bounds extensions included) from StaticMesh.get_bounding_box()."""
+    box = sm.get_bounding_box()
+    lo, hi = box.min, box.max
+    return {
+        "min": {"x": lo.x, "y": lo.y, "z": lo.z},
+        "max": {"x": hi.x, "y": hi.y, "z": hi.z},
+        "size": {"x": hi.x - lo.x, "y": hi.y - lo.y, "z": hi.z - lo.z},
+        "center": {"x": (lo.x + hi.x) / 2.0, "y": (lo.y + hi.y) / 2.0, "z": (lo.z + hi.z) / 2.0},
+    }
+
+
+def _static_mesh_nanite(sm) -> Dict[str, Any]:
+    """Nanite settings from the reflected nanite_settings property (a plain property copy)."""
+    settings = sm.get_editor_property("nanite_settings")
+    return {
+        "enabled": bool(settings.get_editor_property("enabled")),
+        "fallback_percent_triangles": float(settings.get_editor_property("fallback_percent_triangles")),
+    }
+
+
+def _read_or_note(errors: Dict[str, str], key: str, fn: Callable, *args: Any) -> Any:
+    """Run one read; a Python-level failure goes to `errors` instead of failing the whole tool."""
+    try:
+        return fn(*args)
+    except Exception as e:
+        errors[key] = f"{type(e).__name__}: {e}"
+        return None
+
+
+def _staticmesh_info(path: str, tags: Dict[str, str], slots: Optional[List[dict]], bounds: Optional[dict],
+                     nanite: Optional[dict]) -> dict:
+    """The staticmesh_get_info result, built from the crash-safe reads only."""
+    shared = STATICMESH_UNSAFE + " (collision_prims counts simple and convex shapes together)"
+    return {
+        "path": path,
+        "triangles_lod0": _tag_int(tags, "Triangles"),
+        "verts_lod0": _tag_int(tags, "Vertices"),
+        "uv_channels_lod0": _tag_int(tags, "UVChannels"),
+        "lod_count": _tag_int(tags, "LODs"),
+        "material_slots": len(slots) if slots is not None else _tag_int(tags, "Materials"),
+        "materials": slots,
+        "collision_prims": _tag_int(tags, "CollisionPrims"),
+        "collision_complexity": tags.get("CollisionComplexity"),
+        "bounds": bounds,
+        "nanite_enabled": nanite["enabled"] if nanite else _tag_bool(tags, "NaniteEnabled"),
+        "nanite_fallback_percent": nanite["fallback_percent_triangles"] if nanite else None,
+        "has_nanite_data": _tag_bool(tags, "HasNaniteData"),
+        "simple_collision_count": shared,
+        "convex_collision_count": shared,
+        "has_vertex_colors": STATICMESH_UNSAFE,
+        "lod_screen_sizes": STATICMESH_UNSAFE,
+        "registry": tags,
+        "source": ("asset-registry tags, static_materials, get_bounding_box(), nanite_settings; the "
+                   "StaticMeshEditorSubsystem getters are not called (they crashed UEFN 42.20)"),
+    }
+
+
 @_register("staticmesh_get_info")
 def _cmd_staticmesh_get_info(asset_path: str) -> dict:
+    """Static mesh facts from crash-safe reads only (see the section comment)."""
     sm = _resolve_static_mesh(asset_path)
-    sub = unreal.get_editor_subsystem(unreal.StaticMeshEditorSubsystem)
-    nanite = sub.get_nanite_settings(sm)
-    return {
-        "path": sm.get_path_name(),
-        "verts_lod0": sub.get_number_verts(sm, 0),
-        "material_slots": sub.get_number_materials(sm),
-        "lod_count": sub.get_lod_count(sm),
-        "uv_channels_lod0": sub.get_num_uv_channels(sm, 0),
-        "simple_collision_count": sub.get_simple_collision_count(sm),
-        "convex_collision_count": sub.get_convex_collision_count(sm),
-        "has_vertex_colors": sub.has_vertex_colors(sm),
-        "nanite_enabled": bool(nanite.get_editor_property("enabled")),
-        "nanite_fallback_percent": float(nanite.get_editor_property("fallback_percent_triangles")),
-    }
+    path = sm.get_path_name()
+    errors: Dict[str, str] = {}
+    tags = _read_or_note(errors, "registry", _registry_tags, path, _STATIC_MESH_TAGS) or {}
+    slots = _read_or_note(errors, "materials", _static_mesh_slots, sm)
+    bounds = _read_or_note(errors, "bounds", _static_mesh_bounds, sm)
+    nanite = _read_or_note(errors, "nanite", _static_mesh_nanite, sm)
+    info = _staticmesh_info(path, tags, slots, bounds, nanite)
+    if errors:
+        info["read_errors"] = errors
+    return info
 
 
 @_register("staticmesh_enable_nanite")
@@ -1416,16 +1639,24 @@ def _cmd_staticmesh_enable_nanite(
 ) -> dict:
     sm = _resolve_static_mesh(asset_path)
     sub = unreal.get_editor_subsystem(unreal.StaticMeshEditorSubsystem)
-    settings = sub.get_nanite_settings(sm)
+    # Start from the mesh's own settings (the reflected property, not the subsystem getter, which is
+    # on the UEFN 42.20 crash list) so every other Nanite setting is kept.
+    settings = sm.get_editor_property("nanite_settings")
     settings.set_editor_property("enabled", bool(enabled))
     settings.set_editor_property("fallback_percent_triangles", float(fallback_percent_triangles))
     sub.set_nanite_settings(sm, settings, apply_changes=True)
-    unreal.EditorAssetLibrary.save_asset(asset_path)
-    return {
+    saved = unreal.EditorAssetLibrary.save_asset(asset_path)
+    errors: Dict[str, str] = {}
+    result = {
         "path": asset_path,
         "nanite_enabled": bool(enabled),
         "fallback_percent_triangles": float(fallback_percent_triangles),
+        "saved": bool(saved),
+        "nanite_settings_after": _read_or_note(errors, "nanite_settings_after", _static_mesh_nanite, sm),
     }
+    if errors:
+        result["read_errors"] = errors
+    return result
 
 
 @_register("staticmesh_set_lods")
@@ -1459,9 +1690,14 @@ def _cmd_staticmesh_set_lods(
 def _cmd_staticmesh_remove_lods(asset_path: str) -> dict:
     sm = _resolve_static_mesh(asset_path)
     sub = unreal.get_editor_subsystem(unreal.StaticMeshEditorSubsystem)
-    sub.remove_lods(sm)
-    unreal.EditorAssetLibrary.save_asset(asset_path)
-    return {"path": asset_path, "lod_count": sub.get_lod_count(sm)}
+    ok = sub.remove_lods(sm)
+    saved = unreal.EditorAssetLibrary.save_asset(asset_path)
+    return {
+        "path": asset_path,
+        "removed": bool(ok),
+        "saved": bool(saved),
+        "lod_count": STATICMESH_UNSAFE + "; read it in a separate call with staticmesh_get_info (tag LODs)",
+    }
 
 
 @_register("staticmesh_add_collision")
@@ -1481,9 +1717,15 @@ def _cmd_staticmesh_add_collision(asset_path: str, shape: str = "box") -> dict:
 def _cmd_staticmesh_remove_collisions(asset_path: str) -> dict:
     sm = _resolve_static_mesh(asset_path)
     sub = unreal.get_editor_subsystem(unreal.StaticMeshEditorSubsystem)
-    sub.remove_collisions(sm)
-    unreal.EditorAssetLibrary.save_asset(asset_path)
-    return {"path": asset_path, "simple_collision_count": sub.get_simple_collision_count(sm)}
+    ok = sub.remove_collisions(sm)
+    saved = unreal.EditorAssetLibrary.save_asset(asset_path)
+    return {
+        "path": asset_path,
+        "removed": bool(ok),
+        "saved": bool(saved),
+        "simple_collision_count": (STATICMESH_UNSAFE + "; read it in a separate call with staticmesh_get_info "
+                                   "(collision_prims)"),
+    }
 
 
 @_register("staticmesh_generate_uv")
@@ -1493,27 +1735,50 @@ def _cmd_staticmesh_generate_uv(
     lod_index: int = 0,
     uv_channel_index: int = 1,
     position: Optional[List[float]] = None,
-    orientation: Optional[List[float]] = None,
+    orientation: Any = None,
     tiling: Optional[List[float]] = None,
+    size: Optional[List[float]] = None,
 ) -> dict:
-    if uv_type.lower() not in _UV_GEN_MAP:
-        raise ValueError(f"uv_type must be one of {_UV_GEN_MAP}, got {uv_type!r}")
+    """Project UVs with a gizmo: generate_{planar,cylindrical}_uv_channel(mesh, lod, channel,
+    position: Vector, orientation: Rotator, tiling: Vector2D) and generate_box_uv_channel(...,
+    size: Vector). position defaults to the bounds center, size to the bounds size (get_bounding_box)."""
+    t = str(uv_type).lower()
+    if t not in _UV_GEN_MAP:
+        raise ValueError(f"uv_type must be one of {sorted(_UV_GEN_MAP)}, got {uv_type!r}")
+    if t == "box" and tiling is not None:
+        raise ValueError("tiling applies to planar / cylindrical projections; a box projection takes size")
+    if t != "box" and size is not None:
+        raise ValueError("size applies to the box projection only; planar / cylindrical take tiling")
+    # Validate every argument before touching the mesh.
+    if orientation is not None:
+        rot = _make_rotator(orientation, "orientation")
+    else:
+        rot = unreal.Rotator(roll=0.0, pitch=0.0, yaw=0.0)
+    pos = _float_list(position, 3, "position") if position is not None else None
+    box_size = _float_list(size, 3, "size") if size is not None else None
+    uv_tiling = _float_list(tiling, 2, "tiling") if tiling is not None else [1.0, 1.0]
+
     sm = _resolve_static_mesh(asset_path)
     sub = unreal.get_editor_subsystem(unreal.StaticMeshEditorSubsystem)
-
-    pos = unreal.Vector2D(*(position or [0.0, 0.0]))
-    orient = unreal.Vector2D(*(orientation or [0.0, 0.0]))
-    til = unreal.Vector2D(*(tiling or [1.0, 1.0]))
-
-    t = uv_type.lower()
-    if t == "planar":
-        ok = sub.generate_planar_uv_channel(sm, lod_index, uv_channel_index, pos, orient, til)
-    elif t == "box":
-        ok = sub.generate_box_uv_channel(sm, lod_index, uv_channel_index, pos, orient, til)
+    if pos is None or (t == "box" and box_size is None):
+        bounds = _static_mesh_bounds(sm)
+        if pos is None:
+            pos = [bounds["center"][k] for k in ("x", "y", "z")]
+        if t == "box" and box_size is None:
+            box_size = [bounds["size"][k] for k in ("x", "y", "z")]
+    if t == "box":
+        ok = sub.generate_box_uv_channel(sm, lod_index, uv_channel_index, unreal.Vector(*pos), rot,
+                                         unreal.Vector(*box_size))
+        extra = {"size": box_size}
     else:
-        ok = sub.generate_cylindrical_uv_channel(sm, lod_index, uv_channel_index, pos, orient, til)
-    unreal.EditorAssetLibrary.save_asset(asset_path)
-    return {"path": asset_path, "uv_type": t, "channel": uv_channel_index, "lod": lod_index, "ok": bool(ok)}
+        fn = sub.generate_planar_uv_channel if t == "planar" else sub.generate_cylindrical_uv_channel
+        ok = fn(sm, lod_index, uv_channel_index, unreal.Vector(*pos), rot, unreal.Vector2D(*uv_tiling))
+        extra = {"tiling": uv_tiling}
+    saved = unreal.EditorAssetLibrary.save_asset(asset_path) if ok else False
+    result = {"path": asset_path, "uv_type": t, "channel": uv_channel_index, "lod": lod_index, "ok": bool(ok),
+              "saved": bool(saved), "position": pos, "orientation": _serialize(rot)}
+    result.update(extra)
+    return result
 
 
 # -- Asset Pipeline tools ---------------------------------------------------
@@ -1908,8 +2173,9 @@ def _coerce_editable_value(
     value_type hints:
         "int", "float", "bool", "string" — primitive coercion
         "actor"                           — resolve via _find_actor(value)
-        "vector"                          — [x,y,z] → unreal.Vector
-        "rotator"                         — [pitch,yaw,roll] → unreal.Rotator
+        "vector"                          — [x,y,z] or {x,y,z} → unreal.Vector
+        "rotator"                         — {pitch,yaw,roll} → unreal.Rotator (keywords;
+                                            lists only as [a,a,a], see _parse_rotation)
         "array:INNER"                     — list of INNER (e.g. "array:actor",
                                             "array:int"). Empty list allowed.
         "auto" (default)                  — infer from current field value
@@ -1969,9 +2235,7 @@ def _coerce_editable_value(
             return unreal.Vector(float(value["x"]), float(value["y"]), float(value["z"]))
         return unreal.Vector(float(value[0]), float(value[1]), float(value[2]))
     if value_type == "rotator":
-        if isinstance(value, dict):
-            return unreal.Rotator(float(value["pitch"]), float(value["yaw"]), float(value["roll"]))
-        return unreal.Rotator(float(value[0]), float(value[1]), float(value[2]))
+        return _make_rotator(value, f"{field} (rotator)")
     if value_type == "actor":
         if value is None or value == "":
             return None

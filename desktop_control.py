@@ -1,13 +1,19 @@
-"""Desktop control for the UEFN MCP server: see the Windows desktop and drive UEFN / Fortnite UI.
+"""Desktop control for the UEFN MCP server: see the Windows desktop and drive the UEFN UI.
 
 Several UEFN steps have no scripting surface: the crash-report dialog, the HUB (project browser)
-screen, Launch Session / Push Changes hotkeys, modal dialogs, and the Fortnite client itself. These
-tools let an agent look at the desktop and send real mouse / keyboard input, inside safety rails:
+screen, Launch Session / Push Changes hotkeys and modal dialogs; the Fortnite client of a session is
+worth watching too. These tools let an agent look at the desktop and send real mouse / keyboard
+input, inside safety rails:
 
 * **Allowlist.** Input goes only to windows of allowed processes: the UEFN editor, its crash
-  reporter, the Epic Games Launcher and the Fortnite client. ``UEFN_DESKTOP_ALLOW`` replaces the
-  list (comma-separated process names, ``*`` / ``?`` globs); a leading ``+`` extends it instead;
-  ``*`` alone disables the check (dangerous: any window can then receive input).
+  reporter and the Epic Games Launcher. ``UEFN_DESKTOP_ALLOW`` replaces the list (comma-separated
+  process names, ``*`` / ``?`` globs); a leading ``+`` extends it instead; ``*`` alone disables the
+  check (dangerous: any other window can then receive input).
+* **Fortnite client: screenshots only.** The game client and its launcher run under anti-cheat, and
+  synthetic input there can count as automation under Epic's terms (the account is at risk). They
+  are not in the default list, and neither ``*`` nor a broad glob such as ``Fortnite*`` lets input
+  reach them: only an entry that names them does (``UEFN_DESKTOP_ALLOW=+FortniteClient-Win64-Shipping``),
+  set with the owner's explicit consent. Screenshots and window lists of the client stay allowed.
 * **Foreground check.** Every input call names or resolves its target window, brings it to the
   foreground, and re-checks right before each input batch that the foreground window belongs to an
   allowed process (and to the target's process). Otherwise it refuses with a clear error.
@@ -61,9 +67,19 @@ DEFAULT_ALLOWED_PROCESSES = (
     "UnrealEditorFortnite-Win64-Shipping",  # UEFN editor, also its HUB / project browser
     "CrashReportClientEditor*",             # UEFN crash report dialog
     "EpicGamesLauncher",                    # Epic Games Launcher
-    "FortniteClient-Win64-Shipping*",       # Fortnite client (incl. anti-cheat variants)
-    "FortniteLauncher",                     # Fortnite bootstrap launcher
 )
+# Anti-cheat-protected processes: no input unless an allowlist entry names them (pattern -> the stem
+# that entry must start with). `*`, `+*` or `Fortnite*` never count as naming them.
+PROTECTED_PROCESSES = {
+    "fortniteclient-win64-shipping*": "fortniteclient",  # the game client, incl. _EAC / _EAC_EOS / _BE
+    "fortnitelauncher": "fortnitelauncher",              # its bootstrap launcher
+}
+PROTECTED_OPT_IN = "+FortniteClient-Win64-Shipping"
+PROTECTED_WARNING = (
+    "Desktop input into the Fortnite game client is off by default: the client runs under anti-cheat, and "
+    "synthetic input can count as automation under Epic's terms, which puts the account at risk. Screenshots "
+    f"still work. Enable it only with the owner's explicit consent: UEFN_DESKTOP_ALLOW={PROTECTED_OPT_IN} in "
+    "the env of the uefn server.")
 ALLOW_ENV = "UEFN_DESKTOP_ALLOW"
 DISABLE_ENV = "UEFN_DESKTOP_DISABLE"
 LOG_ENV = "UEFN_DESKTOP_LOG"
@@ -100,7 +116,8 @@ def normalize_process_name(name: str) -> str:
 def parse_allowlist(value: Optional[str]) -> tuple[list[str], bool]:
     """Parse UEFN_DESKTOP_ALLOW. Returns (patterns, check_disabled).
 
-    None / empty -> the defaults; 'a,b' replaces them; '+a,b' extends them; '*' disables the check.
+    None / empty -> the defaults; 'a,b' replaces them; '+a,b' extends them; '*' disables the check
+    (for everything except the protected Fortnite client processes, which other entries must name).
     """
     defaults = [normalize_process_name(p) for p in DEFAULT_ALLOWED_PROCESSES]
     if value is None or not value.strip():
@@ -110,20 +127,51 @@ def parse_allowlist(value: Optional[str]) -> tuple[list[str], bool]:
     if extend:
         text = text[1:]
     items = [normalize_process_name(x) for x in text.split(",") if x.strip()]
-    if "*" in items:
-        return ["*"], True
-    out: list[str] = []
-    for p in (defaults if extend else []) + items:
+    disabled = "*" in items
+    out: list[str] = ["*"] if disabled else []
+    for p in (defaults if extend and not disabled else []) + items:
         if p and p not in out:
             out.append(p)
-    return out, False
+    return out, disabled
+
+
+def protected_stem(name: str) -> Optional[str]:
+    """For a protected (anti-cheat) process name, the stem an allowlist entry must start with; else None."""
+    n = normalize_process_name(name)
+    for pattern, stem in PROTECTED_PROCESSES.items():
+        if n and fnmatch.fnmatchcase(n, pattern):
+            return stem
+    return None
 
 
 def process_allowed(name: str, patterns: Sequence[str], disabled: bool = False) -> bool:
+    n = normalize_process_name(name)
+    stem = protected_stem(n)
+    if stem is not None:  # only an entry that names the process lets input through
+        return any(p.startswith(stem) and fnmatch.fnmatchcase(n, p) for p in patterns)
     if disabled:
         return True
-    n = normalize_process_name(name)
     return bool(n) and any(fnmatch.fnmatchcase(n, p) for p in patterns)
+
+
+def allowlist_warnings(patterns: Sequence[str], disabled: bool) -> list[str]:
+    """Warnings about the effective allowlist (shown by desktop_list_windows)."""
+    warnings = []
+    named = [p for p in patterns if any(p.startswith(stem) for stem in PROTECTED_PROCESSES.values())]
+    if named:
+        warnings.append(
+            f"{ALLOW_ENV} names the Fortnite game client ({', '.join(named)}): desktop input can reach it. It runs "
+            "under anti-cheat and synthetic input can count as automation under Epic's terms (the account is at "
+            "risk): send it input only on the owner's explicit request, use screenshots otherwise.")
+    if disabled:
+        warnings.append(f"{ALLOW_ENV}=* disables the allowlist: every window except the Fortnite game client can "
+                        "receive input.")
+    return warnings
+
+
+def refusal_hint(process: str) -> str:
+    """Extra text for a refusal whose target is a protected process ('' otherwise)."""
+    return f" {PROTECTED_WARNING}" if protected_stem(process) else ""
 
 
 def allowlist() -> tuple[list[str], bool]:
@@ -1370,9 +1418,15 @@ def resolve_target(act: _ActionLog, monitors: Sequence[dict], process: str = "",
         raise DesktopRefused("no target window")
     act.fields["target"] = brief(target)
     if not is_allowed(target["process"]):
+        if protected_stem(target["process"]):
+            raise DesktopRefused(
+                f"target window '{target['title']}' belongs to the Fortnite game client "
+                f"('{target['process']}'). {PROTECTED_WARNING}")
         raise DesktopRefused(
             f"target window '{target['title']}' belongs to '{target['process'] or 'unknown'}', which is not in the "
             f"desktop allowlist {allowlist()[0]} (set {ALLOW_ENV} to change it)")
+    if protected_stem(target["process"]):
+        act.fields["protected_target"] = True  # explicit opt-in in effect: keep it visible in the audit log
     _check_integrity(target)
     return target
 
@@ -1397,7 +1451,7 @@ def verify_foreground(target: dict) -> dict:
     if not fg or not is_allowed(fg["process"]):
         raise DesktopRefused(
             f"refusing input: the foreground window is '{(fg or {}).get('title', '')}' "
-            f"({(fg or {}).get('process', 'none')}), not an allowed process")
+            f"({(fg or {}).get('process', 'none')}), not an allowed process.{refusal_hint((fg or {}).get('process', ''))}")
     if fg["pid"] != target["pid"]:
         raise DesktopRefused(
             f"refusing input: the foreground switched to '{fg['title']}' ({fg['process']}) instead of "
@@ -1414,7 +1468,7 @@ def _verify_point(target: dict, x: int, y: int, monitors: Sequence[dict]) -> Non
     if not w or not is_allowed(w["process"]):
         raise DesktopRefused(
             f"point ({x}, {y}) is covered by '{(w or {}).get('title', '')}' ({(w or {}).get('process', 'nothing')}), "
-            "not an allowed window")
+            f"not an allowed window.{refusal_hint((w or {}).get('process', ''))}")
     if w["pid"] != target["pid"]:
         raise DesktopRefused(
             f"point ({x}, {y}) shows '{w['title']}' ({w['process']}), not the target '{target['title']}' "
@@ -1712,7 +1766,8 @@ def op_close(process: str = "", title: str = "", class_name: str = "", all_match
             return {"ok": True, "closed": [], "note": "no visible window matches; nothing to close"}
         bad = [w for w in wins if not is_allowed(w["process"])]
         if bad:
-            raise DesktopRefused(f"refusing to close windows of non-allowed processes: {[brief(w) for w in bad]}")
+            hint = next((refusal_hint(w["process"]) for w in bad if protected_stem(w["process"])), "")
+            raise DesktopRefused(f"refusing to close windows of non-allowed processes: {[brief(w) for w in bad]}.{hint}")
         if len(wins) > 1 and not all_matches:
             raise DesktopRefused(f"{len(wins)} windows match; narrow the filter or pass all_matches=true: "
                                  f"{[brief(w) for w in wins]}")
@@ -1766,6 +1821,7 @@ def list_windows_report(process: str = "", title: str = "", class_name: str = ""
         "kill_switch_active": kill_switch_hit(cur, monitors),
         "monitors": public_monitors(monitors), "virtual_screen": virtual_screen(monitors),
         "dpi_awareness": dpi_awareness(), "allowlist": patterns, "allowlist_disabled": disabled,
+        "allowlist_warnings": allowlist_warnings(patterns, disabled),
     }
 
 
@@ -1786,7 +1842,8 @@ def register(mcp) -> None:
         """List top-level windows (z-order, topmost first) with process, pid, class, rect in physical screen
         pixels, monitor, visible/minimized/foreground flags and whether desktop input may target them.
         Also returns the monitors (EnumDisplayMonitors order = desktop_screenshot's monitor index), the
-        virtual desktop, the cursor, the kill-switch state and the input allowlist. Read-only.
+        virtual desktop, the cursor, the kill-switch state, the input allowlist and warnings about it
+        (for example an opt-in for the anti-cheat-protected Fortnite client). Read-only.
 
         Args:
             process: Filter: process name, substring or glob (e.g. 'UnrealEditorFortnite', 'Fortnite*').
@@ -1811,7 +1868,9 @@ def register(mcp) -> None:
         `region` to zoom into details). Pass the returned `path` (or `shot_id`) as `shot` to
         desktop_click / desktop_move / desktop_drag / desktop_scroll to use image pixels directly
         (mapping: screen = origin + floor((image + 0.5) * scale)). `count` > 1 takes a burst every
-        `interval_sec` (max 120 s), e.g. to record a Fortnite session at fixed moments. Read-only.
+        `interval_sec` (max 120 s), e.g. to record a Fortnite session at fixed moments. Read-only, so
+        the Fortnite client can be captured; it gets no input by default (not even a focus), so it
+        must already be in front.
         """
         count = max(1, min(int(count), 100))
         if count > 1 and count * interval_sec > MAX_BURST_SECONDS:

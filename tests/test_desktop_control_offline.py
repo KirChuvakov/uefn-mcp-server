@@ -1,8 +1,9 @@
 """Offline tests for desktop_control.py. No input is ever sent; nothing needs UEFN.
 
-Covers key-name and combo parsing, allowlist parsing / matching, coordinate mapping with synthetic
-monitor layouts (negative origins, 125 % / 150 % scaling), SendInput absolute normalization, the
-kill switch, sensitive-text redaction, the PNG encoder and the audit log.
+Covers key-name and combo parsing, allowlist parsing / matching (the anti-cheat-protected Fortnite
+client gets input only through an explicit opt-in), coordinate mapping with synthetic monitor layouts
+(negative origins, 125 % / 150 % scaling), SendInput absolute normalization, the kill switch,
+sensitive-text redaction, the PNG encoder and the audit log.
 
     python tests/test_desktop_control_offline.py          # offline tests (pytest also collects them)
     python tests/test_desktop_control_offline.py --live   # + read-only live smoke: windows, cursor,
@@ -91,19 +92,25 @@ def test_mouse_buttons():
 
 # -- allowlist -----------------------------------------------------------------------------------
 
+FORTNITE_CLIENT = ["FortniteClient-Win64-Shipping.exe", "FortniteClient-Win64-Shipping_EAC_EOS.exe",
+                   "FortniteClient-Win64-Shipping_BE.exe", "FortniteClient-Win64-Shipping_EAC.exe",
+                   r"C:\Program Files\Epic Games\Fortnite\FortniteGame\Binaries\Win64\FortniteClient-Win64-Shipping.exe",
+                   "FortniteLauncher.exe"]
+
+
 def test_allowlist_defaults():
     patterns, disabled = dc.parse_allowlist(None)
-    assert not disabled and len(patterns) == 5
+    assert not disabled and len(patterns) == 3
     yes = ["UnrealEditorFortnite-Win64-Shipping.exe", r"C:\Program Files\Epic Games\Fortnite\Engine\Binaries\Win64"
            r"\CrashReportClientEditor.exe", "CrashReportClientEditor-Win64-Shipping", "EpicGamesLauncher.exe",
-           "FortniteClient-Win64-Shipping.exe", "FortniteClient-Win64-Shipping_EAC_EOS.exe", "FortniteLauncher.exe",
            '"unrealeditorfortnite-win64-shipping.EXE"']
     no = ["explorer.exe", "WindowsTerminal.exe", "Code.exe", "UnrealEditor.exe", "CrashReportClient.exe",
-          "chrome.exe", "", "UnrealEditorFortnite-Win64-Shipping-evil.exe"]
+          "chrome.exe", "", "UnrealEditorFortnite-Win64-Shipping-evil.exe"] + FORTNITE_CLIENT
     for name in yes:
         assert dc.process_allowed(name, patterns), name
     for name in no:
         assert not dc.process_allowed(name, patterns), name
+    assert dc.allowlist_warnings(patterns, disabled) == []
 
 
 def test_allowlist_env_override():
@@ -111,14 +118,49 @@ def test_allowlist_env_override():
     assert p == ["notepad"] and not d
     assert dc.process_allowed("NOTEPAD.EXE", p) and not dc.process_allowed("UnrealEditorFortnite-Win64-Shipping", p)
     p, d = dc.parse_allowlist("+notepad, CrashReportClient")
-    assert len(p) == 7 and "notepad" in p and "crashreportclient" in p
+    assert len(p) == 5 and "notepad" in p and "crashreportclient" in p
     assert dc.process_allowed("UnrealEditorFortnite-Win64-Shipping.exe", p)
     p, d = dc.parse_allowlist("*")
-    assert d and dc.process_allowed("anything.exe", p, d)
+    assert p == ["*"] and d and dc.process_allowed("anything.exe", p, d)
     assert dc.parse_allowlist("   ") == dc.parse_allowlist(None)
     p, _ = dc.parse_allowlist("Foo.EXE, bar*, foo")
     assert p == ["foo", "bar*"]
     assert dc.process_allowed("bargain.exe", p) and not dc.process_allowed("rebar.exe", p)
+
+
+def test_fortnite_client_needs_an_explicit_opt_in():
+    client, eac, launcher = "FortniteClient-Win64-Shipping.exe", "FortniteClient-Win64-Shipping_EAC_EOS.exe", \
+        "FortniteLauncher.exe"
+    for name in FORTNITE_CLIENT:
+        assert dc.protected_stem(name), name
+    for name in ("UnrealEditorFortnite-Win64-Shipping.exe", "EpicGamesLauncher.exe", "Fortnite.exe", ""):
+        assert dc.protected_stem(name) is None, name
+    # the documented opt-in names the game client exactly; the defaults stay
+    p, d = dc.parse_allowlist(dc.PROTECTED_OPT_IN)
+    assert dc.PROTECTED_OPT_IN == "+FortniteClient-Win64-Shipping"
+    assert dc.process_allowed(client, p, d) and not dc.process_allowed(eac, p, d) and not dc.process_allowed(launcher, p, d)
+    assert dc.process_allowed("UnrealEditorFortnite-Win64-Shipping.exe", p, d)
+    p, d = dc.parse_allowlist("+FortniteClient-Win64-Shipping*")
+    assert dc.process_allowed(client, p, d) and dc.process_allowed(eac, p, d)
+    p, d = dc.parse_allowlist("+FortniteLauncher")
+    assert dc.process_allowed(launcher, p, d) and not dc.process_allowed(client, p, d)
+    # broad patterns never reach it, not even with the check disabled
+    for broad in ("*", "+*", "+Fortnite*", "Fortnite*,*Shipping*", "+*client*", "+?ortniteClient-Win64-Shipping",
+                  "+*FortniteClient-Win64-Shipping"):
+        p, d = dc.parse_allowlist(broad)
+        for name in FORTNITE_CLIENT:
+            assert not dc.process_allowed(name, p, d), (broad, name)
+    # `*` plus an entry that names it
+    p, d = dc.parse_allowlist("*, FortniteClient-Win64-Shipping")
+    assert p == ["*", "fortniteclient-win64-shipping"] and d
+    assert dc.process_allowed(client, p, d) and dc.process_allowed("anything.exe", p, d)
+    # warnings and refusal hints
+    w = dc.allowlist_warnings(*dc.parse_allowlist(dc.PROTECTED_OPT_IN))
+    assert len(w) == 1 and "anti-cheat" in w[0] and "fortniteclient-win64-shipping" in w[0]
+    assert any("disables the allowlist" in x for x in dc.allowlist_warnings(*dc.parse_allowlist("*")))
+    hint = dc.refusal_hint(client)
+    assert "UEFN_DESKTOP_ALLOW=+FortniteClient-Win64-Shipping" in hint and "Screenshots" in hint
+    assert dc.refusal_hint("UnrealEditorFortnite-Win64-Shipping.exe") == "" and dc.refusal_hint("") == ""
 
 
 def test_process_matches():

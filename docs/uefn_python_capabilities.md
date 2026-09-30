@@ -135,6 +135,13 @@ Python runs **editor-only** (not runtime). For gameplay logic use **Verse**.
 - Vertex colors: `has_vertex_colors()`, `has_instance_vertex_colors()`
 - Statistics: `get_number_verts()`, `get_num_uv_channels()`
 
+> **UEFN 42.20: do not call the metadata getters.** One read-only probe of `get_lod_count`, `get_number_verts`,
+> `get_number_materials`, `get_simple_collision_count`, `get_collision_complexity`, `get_convex_collision_count`,
+> `get_lod_screen_sizes`, `get_nanite_settings`, `has_vertex_colors`, `get_num_uv_channels`,
+> `StaticMesh.get_num_triangles` / `get_num_sections` and `BodySetup.agg_geom.export_text()` crashed the editor
+> (2026-09-30). Read asset-registry tags, `static_materials`, `get_bounding_box()` and `nanite_settings` instead
+> ([Tools Reference](tools_reference.md#static-meshes-only-crash-safe-reads-uefn-4220)).
+
 ---
 
 ## 5. Geometry Scripting (10/10) — NEW

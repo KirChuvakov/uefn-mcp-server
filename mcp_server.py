@@ -20,15 +20,17 @@ Claude Code config (~/.claude/settings.json or project .mcp.json):
 
 import json
 import os
+import re
 import shutil
 import sys
 import threading
 import time
 import urllib.error
 import urllib.request
-from typing import Any, Optional
+from typing import Annotated, Any, Optional, Union
 
 from mcp.server.fastmcp import FastMCP
+from pydantic import BaseModel, ConfigDict, Field
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -37,8 +39,13 @@ from mcp.server.fastmcp import FastMCP
 DEFAULT_PORT = int(os.environ.get("UEFN_MCP_PORT", "8765"))
 MAX_PORT = 8770
 REQUEST_TIMEOUT = 30.0
+# First listener protocol with the 0.5.0 safety fixes: named rotation axes (keyword-built
+# unreal.Rotator) and static-mesh tools that avoid the getters which crash UEFN 42.20. Commands
+# whose meaning changed are not sent to an older listener (see _require_protocol).
+SAFETY_PROTOCOL = (0, 3, 3)
 
 _discovered_port: Optional[int] = None
+_listener_protocol: Optional[str] = None  # "version" reported by the listener's GET /
 
 # ---------------------------------------------------------------------------
 # Port discovery
@@ -72,7 +79,8 @@ def _discover_port() -> int:
 
 
 def _ping_port(port: int) -> bool:
-    """Quick check if a listener responds on the given port."""
+    """Quick check if a listener responds on the given port (remembers its protocol version)."""
+    global _listener_protocol
     try:
         req = urllib.request.Request(
             f"http://127.0.0.1:{port}",
@@ -80,9 +88,31 @@ def _ping_port(port: int) -> bool:
         )
         with urllib.request.urlopen(req, timeout=1.0) as resp:
             body = json.loads(resp.read().decode())
-            return body.get("status") == "ok"
+            if body.get("status") != "ok":
+                return False
+            _listener_protocol = str(body.get("version") or "")
+            return True
     except Exception:
         return False
+
+
+def _version_tuple(text: Optional[str]) -> Optional[tuple]:
+    """'0.3.3' -> (0, 3, 3); None when there is no number."""
+    nums = re.findall(r"\d+", str(text or ""))
+    return tuple(int(n) for n in nums[:3]) if nums else None
+
+
+def _require_protocol(command: str, minimum: tuple) -> None:
+    """Refuse to send `command` to a listener older than `minimum` (it would act differently)."""
+    have = _version_tuple(_listener_protocol)
+    if have is not None and have >= minimum:
+        return
+    need = ".".join(str(n) for n in minimum)
+    raise RuntimeError(
+        f"'{command}' needs listener protocol {need} or later, but the running listener reports "
+        f"{_listener_protocol or 'no version'}. That listener predates the 0.5.0 safety fixes (rotation axis "
+        "order, static-mesh getters that crash UEFN 42.20), so nothing was sent. Load the current "
+        "uefn_listener.py: reopen the project (autostart) or run it with Tools > Execute Python Script.")
 
 
 # ---------------------------------------------------------------------------
@@ -90,19 +120,23 @@ def _ping_port(port: int) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _send_command(command: str, params: Optional[dict] = None, timeout: float = REQUEST_TIMEOUT) -> dict:
+def _send_command(command: str, params: Optional[dict] = None, timeout: float = REQUEST_TIMEOUT,
+                  min_protocol: Optional[tuple] = None) -> dict:
     """Send a command to the UEFN listener and return the result.
 
-    Auto-discovers the listener port by scanning the range.
+    Auto-discovers the listener port by scanning the range. With `min_protocol`, a listener
+    reporting an older protocol version gets nothing (RuntimeError instead).
 
     Raises:
         ConnectionError: Listener is not running.
-        RuntimeError: Command failed on the UEFN side.
+        RuntimeError: Command failed on the UEFN side, or the listener is too old.
         TimeoutError: Command timed out.
     """
     global _discovered_port
 
     port = _discover_port()
+    if min_protocol is not None:
+        _require_protocol(command, min_protocol)
     url = f"http://127.0.0.1:{port}"
 
     payload = json.dumps({"command": command, "params": params or {}}).encode()
@@ -119,7 +153,7 @@ def _send_command(command: str, params: Optional[dict] = None, timeout: float = 
         # Port may have changed — invalidate cache and retry once
         if _discovered_port is not None:
             _discovered_port = None
-            return _send_command(command, params, timeout)
+            return _send_command(command, params, timeout, min_protocol)
         raise ConnectionError(
             "UEFN listener is not running. "
             "Start it in the UEFN editor console: py \"path/to/uefn_listener.py\""
@@ -175,6 +209,53 @@ threading.Thread(target=_heartbeat_loop, daemon=True).start()
 
 
 # ---------------------------------------------------------------------------
+# Rotation convention (0.5.0)
+# ---------------------------------------------------------------------------
+# unreal.Rotator's Python constructor is Rotator(roll, pitch, yaw). Before 0.5.0 the tools
+# documented rotation lists as [pitch, yaw, roll] but the listener passed them positionally,
+# so UEFN applied them as [roll, pitch, yaw]. Rotations are now named axes; the listener
+# builds every Rotator with keywords and refuses ambiguous lists (_parse_rotation there).
+
+
+class Rotation(BaseModel):
+    """Rotation in degrees with named axes, as unreal.Rotator stores it. Missing axes are 0."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    pitch: float = Field(0.0, description="Degrees around the Y axis: nose up (+) / down (-).")
+    yaw: float = Field(0.0, description="Degrees around the Z axis: the heading.")
+    roll: float = Field(0.0, description="Degrees around the X axis: the bank.")
+
+
+# Named axes, or a list of three EQUAL numbers such as [0, 0, 0]; the listener refuses other lists.
+RotationArg = Optional[Union[Rotation, Annotated[list[float], Field(min_length=3, max_length=3)]]]
+
+
+def _wire_rotation(value: Any) -> Any:
+    """A rotation argument as JSON for the listener: named axes as a dict, a list unchanged."""
+    if isinstance(value, BaseModel):
+        return value.model_dump()
+    return value
+
+
+def _device_value_may_be_rotator(value_type: str, value: Any) -> bool:
+    """True when a device_set_editable value can land in a rotator field (then the listener must be 0.5.0+)."""
+    vt = (value_type or "auto").strip().lower()
+    if vt in ("rotator", "array:rotator"):
+        return True
+    if vt != "auto":
+        return False
+    items = value if isinstance(value, list) and value and isinstance(value[0], (list, dict)) else [value]
+    for item in items:
+        if isinstance(item, dict) and set(item) & {"pitch", "yaw", "roll"}:
+            return True
+        if (isinstance(item, list) and len(item) == 3
+                and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in item)):
+            return True
+    return False
+
+
+# ---------------------------------------------------------------------------
 # MCP Server
 # ---------------------------------------------------------------------------
 
@@ -188,6 +269,11 @@ mcp = FastMCP(
         "(mesh_scatter), and Verse source introspection (verse_list_services, "
         "verse_list_editables, verse_service_graph, verse_find_resource_usage, "
         "verse_check_editable_coverage).\n\n"
+        "Rotations are named axes in degrees, e.g. {\"pitch\": -10, \"yaw\": 90, \"roll\": 0} "
+        "(unreal.Rotator fields; missing axes are 0); a list is refused unless its three values "
+        "are equal. staticmesh_* tools use only reads that are safe in UEFN 42.20: its "
+        "StaticMeshEditorSubsystem metadata getters (has_vertex_colors, get_lod_count, ...) crash "
+        "the editor, so never call them from execute_python either.\n\n"
         "Verse build: verse_compile compiles the project over the UEFN workflow "
         "socket and returns structured errors/warnings; verse_push pushes changes "
         "to a live session. These need UEFN running but NOT the editor listener.\n\n"
@@ -198,9 +284,11 @@ mcp = FastMCP(
         "desktop_screenshot, desktop_focus_window, desktop_click, desktop_move, "
         "desktop_drag, desktop_scroll, desktop_type, desktop_key, desktop_close_window, "
         "desktop_wait_for_window — for UI that editor Python cannot reach (crash "
-        "dialog, HUB project tiles, Launch Session / Push hotkeys, modal dialogs, the "
-        "Fortnite client). Input goes only to allowlisted processes (UEFN, its crash "
-        "reporter, the Epic launcher, Fortnite; UEFN_DESKTOP_ALLOW), after focusing "
+        "dialog, HUB project tiles, Launch Session / Push hotkeys, modal dialogs) and "
+        "screenshots of the Fortnite client. Input goes only to allowlisted processes "
+        "(UEFN, its crash reporter, the Epic launcher; UEFN_DESKTOP_ALLOW), never to the "
+        "anti-cheat-protected Fortnite game client unless the owner opted in (synthetic "
+        "input there risks the account), after focusing "
         "and re-checking the foreground; a mouse parked in a monitor's top-left corner "
         "stops all input; every action is logged. Screenshots return a pixel mapping: "
         "pass shot=<path> to desktop_click to use image coordinates. Prefer "
@@ -323,7 +411,7 @@ def spawn_actor(
     asset_path: str = "",
     actor_class: str = "",
     location: Optional[list[float]] = None,
-    rotation: Optional[list[float]] = None,
+    rotation: RotationArg = None,
 ) -> str:
     """Spawn an actor in the current level.
 
@@ -333,7 +421,9 @@ def spawn_actor(
         asset_path: Asset path to spawn from (e.g. '/Engine/BasicShapes/Cube').
         actor_class: Unreal class name (e.g. 'PointLight', 'CameraActor').
         location: [x, y, z] coordinates. Defaults to origin.
-        rotation: [pitch, yaw, roll] in degrees. Defaults to zero.
+        rotation: Named axes in degrees, e.g. {"yaw": 90} or {"pitch": -10, "yaw": 45, "roll": 0}
+            (missing axes are 0). Defaults to zero. A list is accepted only when its three values
+            are equal ([0, 0, 0]); any other list is refused as ambiguous.
     """
     params: dict[str, Any] = {}
     if asset_path:
@@ -343,8 +433,9 @@ def spawn_actor(
     if location is not None:
         params["location"] = location
     if rotation is not None:
-        params["rotation"] = rotation
-    result = _send_command("spawn_actor", params)
+        params["rotation"] = _wire_rotation(rotation)
+    result = _send_command("spawn_actor", params,
+                           min_protocol=SAFETY_PROTOCOL if rotation is not None else None)
     return json.dumps(result, indent=2)
 
 
@@ -363,7 +454,7 @@ def delete_actors(actor_paths: list[str]) -> str:
 def set_actor_transform(
     actor_path: str,
     location: Optional[list[float]] = None,
-    rotation: Optional[list[float]] = None,
+    rotation: RotationArg = None,
     scale: Optional[list[float]] = None,
 ) -> str:
     """Set an actor's transform (location, rotation, and/or scale).
@@ -371,17 +462,20 @@ def set_actor_transform(
     Args:
         actor_path: Actor path name or label.
         location: [x, y, z] world coordinates.
-        rotation: [pitch, yaw, roll] in degrees.
+        rotation: Named axes in degrees, e.g. {"pitch": 0, "yaw": 180, "roll": 0} (missing axes
+            are 0; the whole rotation is replaced). A list is accepted only when its three values
+            are equal; any other list is refused as ambiguous.
         scale: [x, y, z] scale factors.
     """
     params: dict[str, Any] = {"actor_path": actor_path}
     if location is not None:
         params["location"] = location
     if rotation is not None:
-        params["rotation"] = rotation
+        params["rotation"] = _wire_rotation(rotation)
     if scale is not None:
         params["scale"] = scale
-    result = _send_command("set_actor_transform", params)
+    result = _send_command("set_actor_transform", params,
+                           min_protocol=SAFETY_PROTOCOL if rotation is not None else None)
     return json.dumps(result, indent=2)
 
 
@@ -432,8 +526,11 @@ def select_actors(actor_paths: list[str], add_to_selection: bool = False) -> str
 
 @mcp.tool()
 def focus_selected() -> str:
-    """Move the viewport camera to focus on the currently selected actors (like pressing F)."""
-    result = _send_command("focus_selected")
+    """Move the viewport camera to focus on the currently selected actors (like pressing F).
+
+    The camera sits above and behind the selection and looks at its center (pitch -35, yaw 45).
+    """
+    result = _send_command("focus_selected", min_protocol=SAFETY_PROTOCOL)
     return json.dumps(result, indent=2)
 
 
@@ -602,20 +699,24 @@ def get_viewport_camera() -> str:
 @mcp.tool()
 def set_viewport_camera(
     location: Optional[list[float]] = None,
-    rotation: Optional[list[float]] = None,
+    rotation: RotationArg = None,
 ) -> str:
     """Move the viewport camera to a position.
 
     Args:
         location: [x, y, z] world coordinates.
-        rotation: [pitch, yaw, roll] in degrees.
+        rotation: Named axes in degrees, e.g. {"pitch": -90} to look straight down or
+            {"pitch": -30, "yaw": 45} (missing axes are 0; get_viewport_camera returns the same
+            form). A list is accepted only when its three values are equal; any other list is
+            refused as ambiguous.
     """
     params: dict[str, Any] = {}
     if location is not None:
         params["location"] = location
     if rotation is not None:
-        params["rotation"] = rotation
-    result = _send_command("set_viewport_camera", params)
+        params["rotation"] = _wire_rotation(rotation)
+    result = _send_command("set_viewport_camera", params,
+                           min_protocol=SAFETY_PROTOCOL if rotation is not None else None)
     return json.dumps(result, indent=2)
 
 
@@ -854,7 +955,7 @@ def material_set_static_switch_param(instance_path: str, param_name: str, value:
 def niagara_place_actor(
     system_path: str,
     location: Optional[list[float]] = None,
-    rotation: Optional[list[float]] = None,
+    rotation: RotationArg = None,
     label: str = "",
 ) -> str:
     """Spawn a NiagaraActor in the current level with the given NiagaraSystem asset.
@@ -862,17 +963,19 @@ def niagara_place_actor(
     Args:
         system_path: Full path to an existing NiagaraSystem asset.
         location: [x, y, z] world coordinates. Defaults to origin.
-        rotation: [pitch, yaw, roll] in degrees. Defaults to zero.
+        rotation: Named axes in degrees, e.g. {"pitch": 90} (missing axes are 0). Defaults to zero.
+            A list is accepted only when its three values are equal; any other list is refused.
         label: Optional actor label.
     """
     params: dict[str, Any] = {"system_path": system_path}
     if location is not None:
         params["location"] = location
     if rotation is not None:
-        params["rotation"] = rotation
+        params["rotation"] = _wire_rotation(rotation)
     if label:
         params["label"] = label
-    result = _send_command("niagara_place_actor", params)
+    result = _send_command("niagara_place_actor", params,
+                           min_protocol=SAFETY_PROTOCOL if rotation is not None else None)
     return json.dumps(result, indent=2)
 
 
@@ -1157,12 +1260,24 @@ def anim_create_blendspace(
 
 
 # -- Static Mesh tools ------------------------------------------------------
+#
+# UEFN 42.20 crashes (EXCEPTION_ACCESS_VIOLATION) on the StaticMeshEditorSubsystem metadata
+# getters, StaticMesh.get_num_triangles / get_num_sections and BodySetup export_text. The
+# listener (protocol 0.3.3+) never calls them; an older listener still does, so these tools
+# refuse to talk to it (min_protocol).
 
 
 @mcp.tool()
 def staticmesh_get_info(asset_path: str) -> str:
-    """Get static mesh diagnostics: verts, UVs, LOD count, collisions, Nanite state."""
-    result = _send_command("staticmesh_get_info", {"asset_path": asset_path})
+    """Get static mesh facts from reads that are safe in UEFN 42.20.
+
+    Returns triangles / verts / UV channels / LOD count of LOD0 and the collision primitive count
+    (asset-registry tags), material slots, bounds (cm, local space) and Nanite settings.
+    simple / convex collision counts, has_vertex_colors and lod_screen_sizes come back as
+    "not available safely in UEFN 42.20": the StaticMeshEditorSubsystem getters that return them
+    crashed the editor.
+    """
+    result = _send_command("staticmesh_get_info", {"asset_path": asset_path}, min_protocol=SAFETY_PROTOCOL)
     return json.dumps(result, indent=2)
 
 
@@ -1172,12 +1287,13 @@ def staticmesh_enable_nanite(
     enabled: bool = True,
     fallback_percent_triangles: float = 1.0,
 ) -> str:
-    """Enable/disable Nanite on a static mesh. fallback_percent_triangles controls legacy fallback LOD."""
+    """Enable/disable Nanite on a static mesh (saves it; the Nanite build takes seconds).
+    fallback_percent_triangles controls the fallback mesh; the mesh's other Nanite settings are kept."""
     result = _send_command("staticmesh_enable_nanite", {
         "asset_path": asset_path,
         "enabled": enabled,
         "fallback_percent_triangles": fallback_percent_triangles,
-    })
+    }, min_protocol=SAFETY_PROTOCOL)
     return json.dumps(result, indent=2)
 
 
@@ -1205,8 +1321,9 @@ def staticmesh_set_lods(
 
 @mcp.tool()
 def staticmesh_remove_lods(asset_path: str) -> str:
-    """Remove all auto-generated LODs."""
-    result = _send_command("staticmesh_remove_lods", {"asset_path": asset_path})
+    """Remove all LODs except LOD0 (saves the mesh). Returns `removed`; read the new LOD count with
+    staticmesh_get_info in a separate call."""
+    result = _send_command("staticmesh_remove_lods", {"asset_path": asset_path}, min_protocol=SAFETY_PROTOCOL)
     return json.dumps(result, indent=2)
 
 
@@ -1223,8 +1340,10 @@ def staticmesh_add_collision(asset_path: str, shape: str = "box") -> str:
 
 @mcp.tool()
 def staticmesh_remove_collisions(asset_path: str) -> str:
-    """Remove all simple collisions from a static mesh."""
-    result = _send_command("staticmesh_remove_collisions", {"asset_path": asset_path})
+    """Remove all simple collisions from a static mesh (saves it). Returns `removed`; read the new
+    collision primitive count with staticmesh_get_info in a separate call."""
+    result = _send_command("staticmesh_remove_collisions", {"asset_path": asset_path},
+                           min_protocol=SAFETY_PROTOCOL)
     return json.dumps(result, indent=2)
 
 
@@ -1235,10 +1354,23 @@ def staticmesh_generate_uv(
     lod_index: int = 0,
     uv_channel_index: int = 1,
     position: Optional[list[float]] = None,
-    orientation: Optional[list[float]] = None,
+    orientation: RotationArg = None,
     tiling: Optional[list[float]] = None,
+    size: Optional[list[float]] = None,
 ) -> str:
-    """Generate a UV channel on a static mesh (planar / box / cylindrical projection)."""
+    """Generate a UV channel on a static mesh with a projection gizmo (saves it when it worked).
+
+    Args:
+        asset_path: StaticMesh asset path.
+        uv_type: planar | box | cylindrical.
+        lod_index: LOD whose source mesh gets the channel.
+        uv_channel_index: UV channel to write.
+        position: [x, y, z] gizmo center in mesh space (cm). Defaults to the bounds center.
+        orientation: Gizmo rotation as named axes in degrees, e.g. {"pitch": 90} (missing axes are 0).
+            Defaults to zero.
+        tiling: [u, v] tiling for planar / cylindrical. Defaults to [1, 1].
+        size: [x, y, z] gizmo size for box (cm). Defaults to the bounds size.
+    """
     params: dict[str, Any] = {
         "asset_path": asset_path,
         "uv_type": uv_type,
@@ -1248,10 +1380,12 @@ def staticmesh_generate_uv(
     if position is not None:
         params["position"] = position
     if orientation is not None:
-        params["orientation"] = orientation
+        params["orientation"] = _wire_rotation(orientation)
     if tiling is not None:
         params["tiling"] = tiling
-    result = _send_command("staticmesh_generate_uv", params)
+    if size is not None:
+        params["size"] = size
+    result = _send_command("staticmesh_generate_uv", params, min_protocol=SAFETY_PROTOCOL)
     return json.dumps(result, indent=2)
 
 
@@ -1521,7 +1655,9 @@ def device_set_editable(
         actor_path: Actor label, name, or full path.
         field: Verse @editable field name (e.g. "SomeButton", "MyConfig").
         value: New value. For value_type="actor" pass the referenced actor's label.
-            For array types pass a list of elements.
+            For array types pass a list of elements. A rotator takes named axes in degrees,
+            {"pitch": P, "yaw": Y, "roll": R} (missing axes are 0); a list only when its three
+            values are equal.
         value_type: "auto" (infer from current value), "int", "float", "bool",
             "string", "actor", "vector" ({x,y,z}), "rotator" ({pitch,yaw,roll}),
             or "array:INNER" where INNER is one of the scalar types
@@ -1533,7 +1669,8 @@ def device_set_editable(
         "value": value,
         "value_type": value_type,
     }
-    result = _send_command("device_set_editable", params)
+    rotator = _device_value_may_be_rotator(value_type, value)
+    result = _send_command("device_set_editable", params, min_protocol=SAFETY_PROTOCOL if rotator else None)
     return json.dumps(result, indent=2)
 
 
@@ -1562,7 +1699,9 @@ def device_set_editables_bulk(
         "actor_path": actor_path,
         "fields": fields,
     }
-    result = _send_command("device_set_editables_bulk", params)
+    rotator = any(_device_value_may_be_rotator(str(f.get("value_type", "auto")), f.get("value"))
+                  for f in fields if isinstance(f, dict))
+    result = _send_command("device_set_editables_bulk", params, min_protocol=SAFETY_PROTOCOL if rotator else None)
     return json.dumps(result, indent=2)
 
 

@@ -2,6 +2,56 @@
 
 121 tools in 0.5.0 (unreleased; 107 in 0.4.0). The tools up to v0.3.1 have full pages below; the 0.4.0 additions are summarized in [New in v0.4.0](#new-in-v040-summary) and the 0.5.0 desktop and UEFN session tools in [New in v0.5.0](#new-in-v050-desktop-control-and-uefn-session) (each tool's docstring, which Claude Code shows, documents every parameter). Listener tools map 1:1 to a listener command; the Verse build and navigation tools talk to UEFN directly; the desktop and session tools run in the MCP server process.
 
+## Conventions (0.5.0)
+
+### Rotations: named axes
+
+Every rotation parameter (`spawn_actor`, `set_actor_transform`, `set_viewport_camera`, `niagara_place_actor`,
+`staticmesh_generate_uv` `orientation`, rotator values of `device_set_editable`) takes **named axes in degrees**:
+
+```json
+{"pitch": -10, "yaw": 90, "roll": 0}
+```
+
+- Missing axes are 0 (`{"yaw": 90}` is a pure turn). The whole rotation is replaced, not merged with the old one.
+  Pitch turns around Y (positive = nose up), yaw around Z (the heading), roll around X. Tool results report
+  rotations in the same form, so a `get_viewport_camera` result can be passed back as is.
+- Unknown keys, non-numbers and NaN / infinity are refused.
+- **Lists are refused unless all three values are equal** (`[0, 0, 0]`). Before 0.5.0 the tools documented
+  `[pitch, yaw, roll]` but passed the list positionally to `unreal.Rotator`, whose Python constructor is
+  `Rotator(roll, pitch, yaw)`, so UEFN applied it as `[roll, pitch, yaw]` with no error. The refusal names both
+  readings, e.g. for `[0, 90, 0]`: `{"pitch": 0, "yaw": 90, "roll": 0}` (what the docs meant) or
+  `{"pitch": 90, "yaw": 0, "roll": 0}` (what the old tools did).
+- In `execute_python`, always build rotators with keywords: `unreal.Rotator(roll=0.0, pitch=-30.0, yaw=45.0)`.
+- The listener reports protocol 0.3.3 for this convention. The MCP server does not send a rotation, a
+  `focus_selected` or a `staticmesh_*` command to an older listener ("needs listener protocol 0.3.3 or later"):
+  reload `uefn_listener.py` (reopen the project, or Tools > Execute Python Script).
+
+### Static meshes: only crash-safe reads (UEFN 42.20)
+
+UEFN 42.20 died with `EXCEPTION_ACCESS_VIOLATION` (reading `0x18` in the Engine DLL) on one read-only probe of a
+project mesh that called `StaticMeshEditorSubsystem.get_lod_count / get_number_verts / get_number_materials /
+get_simple_collision_count / get_collision_complexity / get_convex_collision_count / get_lod_screen_sizes /
+get_nanite_settings / has_vertex_colors / get_num_uv_channels`, `StaticMesh.get_num_triangles / get_num_sections` and
+`BodySetup.agg_geom.export_text()` (likeliest culprit `has_vertex_colors`). The `staticmesh_*` tools call none of
+them:
+
+- `staticmesh_get_info` reads the asset-registry tags (`Triangles`, `Vertices`, `UVChannels`, `LODs`,
+  `CollisionPrims`, `CollisionComplexity`, `NaniteEnabled`, ...; raw values under `registry`), the `static_materials`
+  slots, `get_bounding_box()` and the `nanite_settings` property. `simple_collision_count`, `convex_collision_count`,
+  `has_vertex_colors` and `lod_screen_sizes` come back as **"not available safely in UEFN 42.20"**
+  (`collision_prims` counts simple and convex shapes together). A read that fails in Python is reported under
+  `read_errors` instead of failing the call.
+- `staticmesh_remove_lods` / `staticmesh_remove_collisions` return `removed` and `saved` and no longer read the
+  count back (`lod_count` / `simple_collision_count` carry the same marker): call `staticmesh_get_info` separately.
+- `staticmesh_enable_nanite` starts from the mesh's `nanite_settings` property (other Nanite settings kept) and
+  returns `nanite_settings_after`.
+- Never call those getters from `execute_python` either. `staticmesh_set_lods` once crashed a long session
+  (2026-08-24, cause unknown): save first and run it on one mesh per call.
+
+Both conventions are verified offline (`tests/test_rotation_offline.py`, `tests/test_staticmesh_safety_offline.py`);
+the live check in UEFN, `tests/test_safety_fixes_live.py`, is pending.
+
 ---
 
 ## System
@@ -166,13 +216,18 @@ Spawn an actor in the current level. Provide either `asset_path` OR `actor_class
 | `asset_path` | string | no | `""` | Asset to spawn (e.g. `/Engine/BasicShapes/Cube`) |
 | `actor_class` | string | no | `""` | UE class name (e.g. `PointLight`, `CameraActor`) |
 | `location` | float[3] | no | `[0,0,0]` | World position `[x, y, z]` |
-| `rotation` | float[3] | no | `[0,0,0]` | Rotation `[pitch, yaw, roll]` in degrees |
+| `rotation` | object | no | zero | Named axes in degrees `{"pitch", "yaw", "roll"}`, missing axes 0 ([Rotations](#rotations-named-axes)) |
 
 **Examples:**
 
 Spawn a cube at position (500, 0, 100):
 ```json
 {"asset_path": "/Engine/BasicShapes/Cube", "location": [500, 0, 100]}
+```
+
+Spawn a cube turned 90 degrees to the left:
+```json
+{"asset_path": "/Engine/BasicShapes/Cube", "location": [500, 0, 100], "rotation": {"yaw": 90}}
 ```
 
 Spawn a point light:
@@ -227,7 +282,7 @@ Set an actor's location, rotation, and/or scale. Only provided fields are change
 |------|------|----------|-------------|
 | `actor_path` | string | yes | Actor path name or label |
 | `location` | float[3] | no | `[x, y, z]` world coordinates |
-| `rotation` | float[3] | no | `[pitch, yaw, roll]` in degrees |
+| `rotation` | object | no | Named axes in degrees `{"pitch", "yaw", "roll"}`, missing axes 0; replaces the whole rotation |
 | `scale` | float[3] | no | `[x, y, z]` scale factors |
 
 **Response:** The updated actor object (same format as `spawn_actor`).
@@ -504,9 +559,10 @@ Move the viewport camera. Only provided fields are changed.
 | Name | Type | Required | Description |
 |------|------|----------|-------------|
 | `location` | float[3] | no | `[x, y, z]` world coordinates |
-| `rotation` | float[3] | no | `[pitch, yaw, roll]` in degrees |
+| `rotation` | object | no | Named axes in degrees, e.g. `{"pitch": -90}` looks straight down; missing axes 0 |
 
-**Response:** The new camera position (same format as `get_viewport_camera`).
+**Response:** The new camera position (same format as `get_viewport_camera`, whose `rotation` can be passed back
+as is).
 
 ---
 
@@ -565,13 +621,16 @@ Programmatically select actors in the UEFN viewport.
 
 ### `focus_selected`
 
-Move the viewport camera to focus on the currently selected actors (like pressing F in the editor).
+Move the viewport camera to focus on the currently selected actors (like pressing F in the editor). The camera
+sits above and behind the selection's center and looks at it (pitch -35, yaw 45; before 0.5.0 it was built with the
+axes swapped and looked up at the sky).
 
 **Parameters:** none
 
 **Response:**
 ```json
-{ "center": { "x": 100, "y": 200, "z": 50 }, "camera": { "x": ..., "y": ..., "z": ... }, "actors_count": 2 }
+{ "center": { "x": 100, "y": 200, "z": 50 }, "camera": { "x": ..., "y": ..., "z": ... },
+  "rotation": { "pitch": -35.0, "yaw": 45.0, "roll": 0.0 }, "actors_count": 2 }
 ```
 
 ---
@@ -861,7 +920,7 @@ One line per tool, taken from its docstring. Full parameter descriptions are in 
 
 | Tool | Parameters | Purpose |
 |---|---|---|
-| `niagara_place_actor` | `system_path`, `location`, `rotation`, `label` | Spawn a NiagaraActor in the current level with the given NiagaraSystem asset. |
+| `niagara_place_actor` | `system_path`, `location`, `rotation`, `label` | Spawn a NiagaraActor in the current level with the given NiagaraSystem asset. `rotation` = named axes ([Rotations](#rotations-named-axes)). |
 | `niagara_set_system_asset` | `actor_path`, `system_path` | Swap the NiagaraSystem asset on an actor's NiagaraComponent. |
 | `niagara_activate` | `actor_path`, `reset` | Activate the NiagaraComponent on an actor. If reset=True, restarts the simulation. |
 | `niagara_deactivate` | `actor_path` | Deactivate the NiagaraComponent on an actor. |
@@ -891,15 +950,17 @@ One line per tool, taken from its docstring. Full parameter descriptions are in 
 
 ### Static meshes
 
+Only crash-safe reads in UEFN 42.20: see [Static meshes: only crash-safe reads](#static-meshes-only-crash-safe-reads-uefn-4220).
+
 | Tool | Parameters | Purpose |
 |---|---|---|
-| `staticmesh_get_info` | `asset_path` | Get static mesh diagnostics: verts, UVs, LOD count, collisions, Nanite state. |
-| `staticmesh_enable_nanite` | `asset_path`, `enabled`, `fallback_percent_triangles` | Enable/disable Nanite on a static mesh. fallback_percent_triangles controls legacy fallback LOD. |
-| `staticmesh_set_lods` | `asset_path`, `percent_triangles`, `screen_sizes`, `auto_compute_screen_size` | Set LODs by triangle reduction. First element = LOD0 (usually 1.0 = full). |
-| `staticmesh_remove_lods` | `asset_path` | Remove all auto-generated LODs. |
+| `staticmesh_get_info` | `asset_path` | Triangles / verts / UV channels / LOD count of LOD0 and `collision_prims` (asset-registry tags), material slots, bounds, Nanite settings; `simple_collision_count`, `convex_collision_count`, `has_vertex_colors`, `lod_screen_sizes` = "not available safely in UEFN 42.20". |
+| `staticmesh_enable_nanite` | `asset_path`, `enabled`, `fallback_percent_triangles` | Enable/disable Nanite on a static mesh (other Nanite settings kept); returns `nanite_settings_after`. |
+| `staticmesh_set_lods` | `asset_path`, `percent_triangles`, `screen_sizes`, `auto_compute_screen_size` | Set LODs by triangle reduction. First element = LOD0 (usually 1.0 = full). Crashed one long session (2026-08-24): save first, one mesh per call. |
+| `staticmesh_remove_lods` | `asset_path` | Remove all LODs except LOD0; returns `removed` (read the new count with `staticmesh_get_info`). |
 | `staticmesh_add_collision` | `asset_path`, `shape` | Add a simple collision primitive. |
-| `staticmesh_remove_collisions` | `asset_path` | Remove all simple collisions from a static mesh. |
-| `staticmesh_generate_uv` | `asset_path`, `uv_type`, `lod_index`, `uv_channel_index`, `position`, `orientation`, `tiling` | Generate a UV channel on a static mesh (planar / box / cylindrical projection). |
+| `staticmesh_remove_collisions` | `asset_path` | Remove all simple collisions from a static mesh; returns `removed`. |
+| `staticmesh_generate_uv` | `asset_path`, `uv_type`, `lod_index`, `uv_channel_index`, `position`, `orientation`, `tiling`, `size` | Generate a UV channel with a planar / box / cylindrical gizmo: `position` [x, y, z] (default: bounds center), `orientation` named axes, `tiling` [u, v] (planar / cylindrical, default [1, 1]), `size` [x, y, z] (box, default: bounds size). Not live-tested in UEFN 42.20 yet. |
 
 ### Asset management
 
@@ -948,7 +1009,7 @@ These call `set_editor_property` / `get_editor_property` on the actor with the p
 | Tool | Parameters | Purpose |
 |---|---|---|
 | `device_list_editables` | `actor_path` | List all Verse @editable fields on a creative_device actor in the level. |
-| `device_set_editable` | `actor_path`, `field`, `value`, `value_type` | Set a Verse @editable field on a creative_device actor. |
+| `device_set_editable` | `actor_path`, `field`, `value`, `value_type` | Set a Verse @editable field on a creative_device actor. Rotator values take named axes `{"pitch", "yaw", "roll"}`. |
 | `device_set_editables_bulk` | `actor_path`, `fields` | Set multiple Verse @editable fields on one actor in a single call. |
 
 ### Verse build (no listener)
@@ -980,6 +1041,8 @@ Persistent `verse-lsp.exe` from the `epicgames.verse` VS Code extension (`VERSE_
 Host-side tools (Windows): they run in the MCP server process and need neither UEFN nor the listener. Safety rails,
 coordinates, UEFN facts and recipes: [desktop_control.md](desktop_control.md). "Acting" tools obey the rails
 (allowlist `UEFN_DESKTOP_ALLOW`, focus and foreground re-check, top-left-corner kill switch, UIPI check, audit log).
+The anti-cheat-protected Fortnite game client is screenshots only: it gets no input (not even a focus) unless the
+owner opts in with `UEFN_DESKTOP_ALLOW=+FortniteClient-Win64-Shipping` (Epic's terms; the account is at risk).
 
 Coordinates are physical pixels of the virtual desktop (the server is per-monitor DPI aware V2; monitors left of or
 above the primary have negative origins). Pointer tools take `x`, `y` plus either `shot` (a `desktop_screenshot` path
@@ -990,7 +1053,7 @@ or `shot_id`: the numbers are pixels of that image) or `relative_to` = `screen` 
 
 | Tool | Parameters | Acting | Purpose |
 |---|---|---|---|
-| `desktop_list_windows` | `process`, `title`, `class_name`, `include_hidden`, `limit` | no | Top-level windows in z-order (process, pid, class, rect, monitor, visible / minimized / foreground, `input_allowed`), monitors, virtual desktop, cursor, kill-switch state, allowlist, DPI awareness. |
+| `desktop_list_windows` | `process`, `title`, `class_name`, `include_hidden`, `limit` | no | Top-level windows in z-order (process, pid, class, rect, monitor, visible / minimized / foreground, `input_allowed`), monitors, virtual desktop, cursor, kill-switch state, allowlist and `allowlist_warnings`, DPI awareness. |
 | `desktop_screenshot` | `monitor`, `process`, `title`, `class_name`, `region`, `output_path`, `max_long_edge`, `max_pixels`, `full_resolution`, `count`, `interval_sec` | no | PNG of a region, a window or a monitor (0 = all); `path`, `shot_id`, `mapping` (`screen = origin + floor((image + 0.5) * scale)`), cursor position in the image, windows covering the target; bursts up to 120 s. |
 | `desktop_focus_window` | `process`, `title`, `class_name`, `timeout_sec` | yes | Restore and bring to the foreground, verified; reports the method that worked. |
 | `desktop_click` | `x`, `y`, `shot`, `relative_to`, `monitor`, `process`, `title`, `button`, `double`, `modifiers`, `hold_ms` | yes | Click after focusing the target; the window under the point must be the target's process. |

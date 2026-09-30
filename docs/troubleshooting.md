@@ -128,6 +128,38 @@ the screenshot file) rather than re-running.
 
 **Fix:** use `execute_python` on the inner object, or read the fields with the official `unreal-mcp` DeviceToolset.
 
+### "rotation: the list [...] is ambiguous" / "unknown key(s)"
+
+**Cause:** since 0.5.0 rotations are named axes. A list is accepted only when its three values are equal: before
+0.5.0 the tools documented `[pitch, yaw, roll]` but UEFN applied the list as `[roll, pitch, yaw]`
+(`unreal.Rotator`'s Python constructor is `Rotator(roll, pitch, yaw)`), silently.
+
+**Fix:** pass `{"pitch": P, "yaw": Y, "roll": R}` (missing axes are 0); the error text spells out both readings of
+your list. Notes and scripts written before 0.5.0 that say "`set_viewport_camera` reads `[roll, pitch, yaw]`"
+describe the old bug: convert them to named axes. In `execute_python` build rotators with keywords
+(`unreal.Rotator(roll=0.0, pitch=-90.0, yaw=0.0)`).
+
+### "'<command>' needs listener protocol 0.3.3 or later"
+
+**Cause:** the MCP server is 0.5.0 but UEFN still runs an older `uefn_listener.py` (loaded when the project opened).
+That listener would apply rotation lists with swapped axes and its `staticmesh_*` handlers call getters that crash
+UEFN 42.20, so rotations, `focus_selected` and `staticmesh_*` are not sent to it (nothing was changed).
+
+**Fix:** load the current listener: reopen the project (autostart hook) or **Tools > Execute Python Script** >
+`uefn_listener.py`; `ping` then reports version 0.3.3 or later.
+
+### `staticmesh_get_info` says "not available safely in UEFN 42.20"
+
+**Expected.** UEFN 42.20 crashed (`EXCEPTION_ACCESS_VIOLATION` reading `0x18` in the Engine DLL) on one read-only probe
+of the `StaticMeshEditorSubsystem` metadata getters (`get_lod_count`, `get_number_verts`, `get_number_materials`,
+`get_simple_collision_count`, `get_collision_complexity`, `get_convex_collision_count`, `get_lod_screen_sizes`,
+`get_nanite_settings`, `has_vertex_colors`, `get_num_uv_channels`), `StaticMesh.get_num_triangles` /
+`get_num_sections` and `BodySetup.agg_geom.export_text()`. The tools read asset-registry tags, material slots, bounds
+and the `nanite_settings` property instead; `simple_collision_count`, `convex_collision_count`, `has_vertex_colors` and
+`lod_screen_sizes` carry that marker (`collision_prims` counts simple and convex shapes together; vertex colours and
+UV sets can be read from an exported GLB). `staticmesh_remove_lods` / `staticmesh_remove_collisions` no longer read
+the count back: call `staticmesh_get_info` in a separate call.
+
 ## Python Execution Issues
 
 ### `execute_python` returns empty result
@@ -149,13 +181,20 @@ result = 1 + 1
 
 **Fix:** Check the `stderr` field for the full traceback. Common issues:
 - `AttributeError`: The API method doesn't exist in UEFN (check `docs/uefn_python_capabilities.md`)
-- `TypeError`: Wrong argument types (use `unreal.Vector`, `unreal.Rotator`, etc.)
+- `TypeError`: Wrong argument types (use `unreal.Vector`, `unreal.Rotator`, etc.; `unreal.Rotator` takes
+  `(roll, pitch, yaw)` positionally, so always pass keywords)
 - `RuntimeError`: Editor state doesn't allow the operation (e.g., saving during PIE)
 
 ### Calls that crash the editor
 
 Never call `tk.Tk()` (use `get_tk_root()` + `tk.Toplevel`), never open asset editors from Python
 (`open_editor_for_assets`), and never run the console command `EDIT COPY` with a `None` world context.
+
+In UEFN 42.20 never call the static-mesh metadata getters (`StaticMeshEditorSubsystem.has_vertex_colors`,
+`get_lod_count`, `get_number_verts`, the other getters listed above, `StaticMesh.get_num_triangles` /
+`get_num_sections`, `BodySetup.agg_geom.export_text()`): one probe killed the editor. Read the asset-registry tags
+(`unreal.AssetRegistryHelpers.get_tag_value(asset_data, "Triangles")`), `static_materials`, `get_bounding_box()` or
+`nanite_settings` instead, and try any new editor API on one asset in its own call before a bulk loop, after saving.
 
 ### `print()` output not visible
 
@@ -243,9 +282,19 @@ emergency stop). Move the mouse away when input is wanted again.
 
 ### "... is not in the desktop allowlist" / "the foreground switched to ..."
 
-Input goes only to allowlisted processes (UEFN, its crash reporter, the Epic launcher, Fortnite), and only while one of
-them is in the foreground. Another app took the foreground (a notification, the owner clicking): retry after checking
+Input goes only to allowlisted processes (UEFN, its crash reporter, the Epic launcher), and only while one of them is in
+the foreground. Another app took the foreground (a notification, the owner clicking): retry after checking
 `desktop_list_windows`. To allow another app, set `UEFN_DESKTOP_ALLOW=+<process>` in the `env` of the `uefn` server.
+
+### "Desktop input into the Fortnite game client is off by default"
+
+**Expected.** The Fortnite client (`FortniteClient-Win64-Shipping*`, `FortniteLauncher`) runs under anti-cheat, and
+synthetic input there can count as automation under Epic's terms: the account is at risk. Since 0.5.0 it is not in the
+default allowlist, and neither `*` nor a broad glob such as `Fortnite*` lets input reach it. Screenshots and window
+lists still work (`desktop_screenshot(process="FortniteClient-Win64-Shipping*")`); the client must already be in front
+(Launch Session brings it up; otherwise ask the owner to click it). Only the owner can opt in, by setting
+`UEFN_DESKTOP_ALLOW=+FortniteClient-Win64-Shipping` in the server's `env`; `desktop_list_windows` then shows an
+`allowlist_warnings` entry and the audit log marks each such call `protected_target`.
 
 ### "could not bring ... to the foreground"
 

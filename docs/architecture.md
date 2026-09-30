@@ -136,6 +136,7 @@ Each MCP tool is a thin wrapper:
 | Scenario | Behavior |
 |----------|----------|
 | Listener not running | `ConnectionError` with instructions to start it |
+| Listener older than the command needs | `RuntimeError`, nothing sent: rotations, `focus_selected` and `staticmesh_*` need protocol 0.3.3+ (the version comes from `GET /`) |
 | Command fails in UEFN | `RuntimeError` with error message and Python traceback |
 | Command times out | `TimeoutError` after 30 seconds |
 | Invalid JSON response | Exception propagated to Claude Code |
@@ -148,10 +149,13 @@ Each MCP tool is a thin wrapper:
 ```json
 {
   "status": "ok",
+  "version": "0.3.3",
   "port": 8765,
   "commands": ["ping", "get_log", "execute_python", ...]
 }
 ```
+
+`version` is the listener protocol (`PROTOCOL_VERSION`); the MCP server reads it during port discovery.
 
 **POST /** — Execute a command
 ```json

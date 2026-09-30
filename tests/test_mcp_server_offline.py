@@ -1,10 +1,11 @@
 """Offline smoke test for mcp_server.py: no UEFN, no listener, no network.
 
 Starts a fresh mcp_server.py over stdio, runs the MCP handshake and
-tools/list, and checks that every tool module registered. UEFN_MCP_PORT is
-set above the listener's scan range (8765-8770), so the server's heartbeat
-never reaches a running editor. Needs only the host Python with
-`pip install -r requirements.txt`.
+tools/list, and checks that every tool module registered, that rotation
+parameters are published as named axes (pitch / yaw / roll) and that the
+instructions carry the 0.5.0 safety rules. UEFN_MCP_PORT is set above the
+listener's scan range (8765-8770), so the server's heartbeat never reaches a
+running editor. Needs only the host Python with `pip install -r requirements.txt`.
 
 Usage: python tests/test_mcp_server_offline.py   (pytest also collects it)
 """
@@ -33,6 +34,9 @@ EXPECTED = {
     "verse_compile", "verse_status", "verse_push",
     "verse_symbols", "verse_hover", "verse_definition", "verse_find_symbol", "verse_lsp_restart",
 } | DESKTOP_TOOLS | SESSION_TOOLS
+# Tools whose rotation parameter must be published as named axes (0.5.0 rotation fix).
+ROTATION_PARAMS = {"spawn_actor": "rotation", "set_actor_transform": "rotation", "set_viewport_camera": "rotation",
+                   "niagara_place_actor": "rotation", "staticmesh_generate_uv": "orientation"}
 
 
 def _run() -> dict:
@@ -66,13 +70,13 @@ def _run() -> dict:
             send({"jsonrpc": "2.0", "id": req_id, "method": "tools/list",
                   "params": {"cursor": cursor} if cursor else {}})
             page = recv(req_id)["result"]
-            tools += [t["name"] for t in page["tools"]]
+            tools += page["tools"]
             cursor, req_id = page.get("nextCursor"), req_id + 1
             if not cursor:
                 break
     finally:
         proc.kill()
-    return {"init": init, "tools": tools}
+    return {"init": init, "tools": [t["name"] for t in tools], "schemas": {t["name"]: t["inputSchema"] for t in tools}}
 
 
 def _check() -> dict:
@@ -81,10 +85,17 @@ def _check() -> dict:
     assert out["init"]["serverInfo"]["name"] == "uefn-mcp"
     instructions = out["init"].get("instructions") or ""
     assert "v0.5.0" in instructions and "desktop_click" in instructions and "uefn_launch_project" in instructions
+    assert '"pitch"' in instructions and "has_vertex_colors" in instructions and "Fortnite game client" in instructions
     assert len(out["tools"]) == len(names), "duplicate tool names"
     assert len(names) >= MIN_TOOLS, f"{len(names)} tools < {MIN_TOOLS}"
     missing = EXPECTED - names
     assert not missing, f"missing tools: {sorted(missing)}"
+    for tool, param in ROTATION_PARAMS.items():
+        schema = out["schemas"][tool]
+        rotation = schema["$defs"]["Rotation"]
+        assert set(rotation["properties"]) == {"pitch", "yaw", "roll"}, tool
+        assert rotation.get("additionalProperties") is False, tool
+        assert {"$ref": "#/$defs/Rotation"} in schema["properties"][param]["anyOf"], tool
     return out
 
 
@@ -97,4 +108,5 @@ if __name__ == "__main__":
     info = result["init"]["serverInfo"]
     names = set(result["tools"])
     print(f"OK: {info['name']} (mcp SDK {info.get('version')}), {len(result['tools'])} tools "
-          f"({len(names & DESKTOP_TOOLS)} desktop_*, {len(names & SESSION_TOOLS)} uefn_* session)")
+          f"({len(names & DESKTOP_TOOLS)} desktop_*, {len(names & SESSION_TOOLS)} uefn_* session), "
+          f"{len(ROTATION_PARAMS)} rotation parameters with named axes")
