@@ -1730,14 +1730,16 @@ def verse_check_editable_coverage(
 
 
 # ---------------------------------------------------------------------------
-# Verse build (workflow socket)
+# Verse build (workflow socket) & Verse LSP navigation
 # ---------------------------------------------------------------------------
-# These talk to UEFN directly (TCP 1962) — they do NOT go through the editor
-# HTTP listener, so they work even without it.
+# These talk to UEFN directly (TCP 1962 / verse-lsp.exe subprocess) — they do
+# NOT go through the editor HTTP listener, so they work even without it.
 
 import verse_workflow
+import verse_lsp_service
 
 verse_workflow.register(mcp)
+verse_lsp_service.register(mcp)
 
 
 # ---------------------------------------------------------------------------
