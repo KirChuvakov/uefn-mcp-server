@@ -1,0 +1,12 @@
+# Host Python (3.10+) that runs mcp_server.py for Claude Code: pip install -r requirements.txt
+mcp>=1.26
+
+# Optional, host Python: screenshot_desktop needs mss.
+# mss>=10
+
+# Optional, UEFN's embedded Python (3.11): the listener's system-tray icon needs pystray + Pillow.
+# They must match UEFN's interpreter, so they are NOT installed into the host Python. Install them into
+# ./vendor with UEFN's python.exe (README, "Tray icon"):
+#   "<Fortnite>\Engine\Binaries\ThirdParty\Python3\Win64\python.exe" -m pip install --target vendor pystray Pillow
+# pystray>=0.19.5
+# Pillow>=12.2

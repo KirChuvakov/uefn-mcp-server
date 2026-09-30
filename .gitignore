@@ -12,3 +12,6 @@ venv/
 
 # Vendored tray deps (pystray + Pillow) — reinstall locally, see README.
 vendor/
+
+# ensure_mcp_hook.ps1 run log
+*.log
