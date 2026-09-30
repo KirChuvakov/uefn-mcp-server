@@ -1743,6 +1743,18 @@ verse_lsp_service.register(mcp)
 
 
 # ---------------------------------------------------------------------------
+# Desktop control (host side, Windows)
+# ---------------------------------------------------------------------------
+# These run in this process (pure ctypes): window listing, GDI screenshots and
+# SendInput input with safety rails.
+# Importing desktop_control makes this process per-monitor DPI aware (V2).
+
+import desktop_control
+
+desktop_control.register(mcp)
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
