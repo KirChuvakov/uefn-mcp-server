@@ -29,7 +29,7 @@ import unreal
 # Configuration
 # ---------------------------------------------------------------------------
 
-PROTOCOL_VERSION = "0.2.0"
+PROTOCOL_VERSION = "0.3.2"
 VERSION_SUFFIX = "by Romasno"
 
 try:
@@ -737,6 +737,1494 @@ def _cmd_set_viewport_camera(
     rot = unreal.Rotator(*rotation) if rotation else cur_rot
     unreal.EditorLevelLibrary.set_level_viewport_camera_info(loc, rot)
     return {"location": _serialize(loc), "rotation": _serialize(rot)}
+
+
+# -- Material tools ----------------------------------------------------------
+
+_MATERIAL_DOMAIN_MAP = {
+    "surface": "MD_SURFACE",
+    "deferred_decal": "MD_DEFERRED_DECAL",
+    "light_function": "MD_LIGHT_FUNCTION",
+    "volume": "MD_VOLUME",
+    "post_process": "MD_POST_PROCESS",
+    "user_interface": "MD_UI",
+    "virtual_texture": "MD_RUNTIME_VIRTUAL_TEXTURE",
+}
+
+_MATERIAL_BLEND_MODE_MAP = {
+    "opaque": "BLEND_OPAQUE",
+    "masked": "BLEND_MASKED",
+    "translucent": "BLEND_TRANSLUCENT",
+    "additive": "BLEND_ADDITIVE",
+    "modulate": "BLEND_MODULATE",
+    "alphacomposite": "BLEND_ALPHACOMPOSITE",
+    "alphaholdout": "BLEND_ALPHAHOLDOUT",
+}
+
+_MATERIAL_PROPERTY_MAP = {
+    "base_color": "MP_BASE_COLOR",
+    "metallic": "MP_METALLIC",
+    "specular": "MP_SPECULAR",
+    "roughness": "MP_ROUGHNESS",
+    "anisotropy": "MP_ANISOTROPY",
+    "emissive_color": "MP_EMISSIVE_COLOR",
+    "opacity": "MP_OPACITY",
+    "opacity_mask": "MP_OPACITY_MASK",
+    "normal": "MP_NORMAL",
+    "tangent": "MP_TANGENT",
+    "world_position_offset": "MP_WORLD_POSITION_OFFSET",
+    "subsurface_color": "MP_SUBSURFACE_COLOR",
+    "ambient_occlusion": "MP_AMBIENT_OCCLUSION",
+    "refraction": "MP_REFRACTION",
+    "pixel_depth_offset": "MP_PIXEL_DEPTH_OFFSET",
+}
+
+
+def _split_asset_path(asset_path: str):
+    parts = asset_path.rsplit("/", 1)
+    if len(parts) != 2 or not parts[0] or not parts[1]:
+        raise ValueError(f"Invalid asset path: {asset_path!r} (expected '/Path/To/AssetName')")
+    return parts[1], parts[0]
+
+
+def _resolve_material(material_path: str):
+    mat = unreal.EditorAssetLibrary.load_asset(material_path)
+    if mat is None:
+        raise ValueError(f"Material not found: {material_path}")
+    if not isinstance(mat, unreal.Material):
+        raise ValueError(f"Asset is not a Material: {material_path} (got {type(mat).__name__})")
+    return mat
+
+
+def _resolve_material_instance(instance_path: str):
+    mi = unreal.EditorAssetLibrary.load_asset(instance_path)
+    if mi is None:
+        raise ValueError(f"Material Instance not found: {instance_path}")
+    if not isinstance(mi, unreal.MaterialInstanceConstant):
+        raise ValueError(f"Asset is not a MaterialInstanceConstant: {instance_path} (got {type(mi).__name__})")
+    return mi
+
+
+def _find_material_expression(mat, node_name: str):
+    exprs = unreal.MaterialEditingLibrary.get_material_expressions(mat)
+    for e in exprs:
+        if e.get_name() == node_name:
+            return e
+    raise ValueError(f"Expression '{node_name}' not found in {mat.get_path_name()}")
+
+
+def _resolve_material_expression_class(name: str):
+    full = name if name.startswith("MaterialExpression") else f"MaterialExpression{name}"
+    cls = getattr(unreal, full, None)
+    if cls is None:
+        raise ValueError(f"Unknown material expression class: {name!r}")
+    return cls
+
+
+@_register("material_create")
+def _cmd_material_create(
+    asset_path: str,
+    domain: str = "surface",
+    blend_mode: str = "opaque",
+    two_sided: bool = False,
+) -> dict:
+    asset_name, package_path = _split_asset_path(asset_path)
+    if unreal.EditorAssetLibrary.does_asset_exist(asset_path):
+        raise ValueError(f"Asset already exists: {asset_path}")
+
+    domain_key = _MATERIAL_DOMAIN_MAP.get(domain.lower())
+    if domain_key is None:
+        raise ValueError(f"Unknown domain {domain!r}. Valid: {list(_MATERIAL_DOMAIN_MAP.keys())}")
+
+    blend_key = _MATERIAL_BLEND_MODE_MAP.get(blend_mode.lower())
+    if blend_key is None:
+        raise ValueError(f"Unknown blend_mode {blend_mode!r}. Valid: {list(_MATERIAL_BLEND_MODE_MAP.keys())}")
+
+    tools = unreal.AssetToolsHelpers.get_asset_tools()
+    mat = tools.create_asset(asset_name, package_path, unreal.Material, unreal.MaterialFactoryNew())
+    if mat is None:
+        raise RuntimeError(f"Failed to create material: {asset_path}")
+
+    mat.set_editor_property("material_domain", getattr(unreal.MaterialDomain, domain_key))
+    mat.set_editor_property("blend_mode", getattr(unreal.BlendMode, blend_key))
+    mat.set_editor_property("two_sided", two_sided)
+    unreal.MaterialEditingLibrary.recompile_material(mat)
+    unreal.EditorAssetLibrary.save_asset(asset_path)
+    return {
+        "material_path": mat.get_path_name(),
+        "domain": domain,
+        "blend_mode": blend_mode,
+        "two_sided": two_sided,
+    }
+
+
+@_register("material_create_instance")
+def _cmd_material_create_instance(parent_path: str, asset_path: str) -> dict:
+    asset_name, package_path = _split_asset_path(asset_path)
+    if unreal.EditorAssetLibrary.does_asset_exist(asset_path):
+        raise ValueError(f"Asset already exists: {asset_path}")
+
+    parent = unreal.EditorAssetLibrary.load_asset(parent_path)
+    if parent is None or not isinstance(parent, unreal.MaterialInterface):
+        raise ValueError(f"Parent is not a MaterialInterface: {parent_path}")
+
+    factory = unreal.MaterialInstanceConstantFactoryNew()
+    factory.set_editor_property("initial_parent", parent)
+    tools = unreal.AssetToolsHelpers.get_asset_tools()
+    mi = tools.create_asset(asset_name, package_path, unreal.MaterialInstanceConstant, factory)
+    if mi is None:
+        raise RuntimeError(f"Failed to create material instance: {asset_path}")
+
+    unreal.EditorAssetLibrary.save_asset(asset_path)
+    return {"instance_path": mi.get_path_name(), "parent_path": parent.get_path_name()}
+
+
+@_register("material_add_expression")
+def _cmd_material_add_expression(
+    material_path: str,
+    expression_class: str,
+    x: int = 0,
+    y: int = 0,
+) -> dict:
+    mat = _resolve_material(material_path)
+    cls = _resolve_material_expression_class(expression_class)
+    expr = unreal.MaterialEditingLibrary.create_material_expression(mat, cls, x, y)
+    if expr is None:
+        raise RuntimeError(f"Failed to create expression {expression_class}")
+    return {
+        "node_name": expr.get_name(),
+        "class": expr.get_class().get_name(),
+        "material_path": mat.get_path_name(),
+    }
+
+
+@_register("material_set_expression_property")
+def _cmd_material_set_expression_property(
+    material_path: str,
+    node_name: str,
+    property_name: str,
+    value: Any,
+) -> dict:
+    mat = _resolve_material(material_path)
+    expr = _find_material_expression(mat, node_name)
+
+    if isinstance(value, list) and len(value) in (3, 4) and all(isinstance(v, (int, float)) for v in value):
+        rgba = [float(v) for v in value] + [1.0] * (4 - len(value))
+        expr.set_editor_property(property_name, unreal.LinearColor(*rgba))
+        out_value: Any = rgba
+    elif isinstance(value, str) and value.startswith("/") and unreal.EditorAssetLibrary.does_asset_exist(value):
+        asset = unreal.EditorAssetLibrary.load_asset(value)
+        expr.set_editor_property(property_name, asset)
+        out_value = value
+    else:
+        expr.set_editor_property(property_name, value)
+        out_value = value
+
+    return {"node": node_name, "property": property_name, "value": out_value}
+
+
+@_register("material_connect_expressions")
+def _cmd_material_connect_expressions(
+    material_path: str,
+    from_node: str,
+    from_output: str,
+    to_node: str,
+    to_input: str,
+) -> dict:
+    mat = _resolve_material(material_path)
+    from_expr = _find_material_expression(mat, from_node)
+    to_expr = _find_material_expression(mat, to_node)
+    ok = unreal.MaterialEditingLibrary.connect_material_expressions(from_expr, from_output, to_expr, to_input)
+    if not ok:
+        raise RuntimeError(f"Failed to connect {from_node}.{from_output} -> {to_node}.{to_input}")
+    unreal.MaterialEditingLibrary.recompile_material(mat)
+    return {"connected": True, "from": f"{from_node}.{from_output}", "to": f"{to_node}.{to_input}"}
+
+
+@_register("material_connect_property")
+def _cmd_material_connect_property(
+    material_path: str,
+    from_node: str,
+    from_output: str,
+    material_property: str,
+) -> dict:
+    mat = _resolve_material(material_path)
+    from_expr = _find_material_expression(mat, from_node)
+    prop_key = _MATERIAL_PROPERTY_MAP.get(material_property.lower())
+    if prop_key is None:
+        raise ValueError(f"Unknown property {material_property!r}. Valid: {list(_MATERIAL_PROPERTY_MAP.keys())}")
+    prop = getattr(unreal.MaterialProperty, prop_key)
+    ok = unreal.MaterialEditingLibrary.connect_material_property(from_expr, from_output, prop)
+    if not ok:
+        raise RuntimeError(f"Failed to connect {from_node}.{from_output} -> {material_property}")
+    unreal.MaterialEditingLibrary.recompile_material(mat)
+    return {"connected": True, "from": f"{from_node}.{from_output}", "to": material_property}
+
+
+@_register("material_list_expressions")
+def _cmd_material_list_expressions(material_path: str) -> dict:
+    mat = _resolve_material(material_path)
+    exprs = unreal.MaterialEditingLibrary.get_material_expressions(mat)
+    out = []
+    for e in exprs:
+        info = {"name": e.get_name(), "class": e.get_class().get_name()}
+        try:
+            pname = e.get_editor_property("parameter_name")
+            if pname:
+                info["parameter_name"] = str(pname)
+        except Exception:
+            pass
+        out.append(info)
+    return {"material_path": mat.get_path_name(), "expressions": out, "count": len(out)}
+
+
+@_register("material_recompile")
+def _cmd_material_recompile(material_path: str) -> dict:
+    mat = _resolve_material(material_path)
+    unreal.MaterialEditingLibrary.recompile_material(mat)
+    unreal.EditorAssetLibrary.save_asset(material_path)
+    return {"recompiled": True, "material_path": mat.get_path_name()}
+
+
+@_register("material_set_scalar_param")
+def _cmd_material_set_scalar_param(instance_path: str, param_name: str, value: float) -> dict:
+    mi = _resolve_material_instance(instance_path)
+    unreal.MaterialEditingLibrary.set_material_instance_scalar_parameter_value(mi, param_name, float(value))
+    unreal.EditorAssetLibrary.save_asset(instance_path)
+    return {"instance_path": instance_path, "param": param_name, "value": float(value)}
+
+
+@_register("material_set_vector_param")
+def _cmd_material_set_vector_param(
+    instance_path: str,
+    param_name: str,
+    r: float,
+    g: float,
+    b: float,
+    a: float = 1.0,
+) -> dict:
+    mi = _resolve_material_instance(instance_path)
+    color = unreal.LinearColor(float(r), float(g), float(b), float(a))
+    unreal.MaterialEditingLibrary.set_material_instance_vector_parameter_value(mi, param_name, color)
+    unreal.EditorAssetLibrary.save_asset(instance_path)
+    return {"instance_path": instance_path, "param": param_name, "value": [r, g, b, a]}
+
+
+@_register("material_set_texture_param")
+def _cmd_material_set_texture_param(instance_path: str, param_name: str, texture_path: str) -> dict:
+    mi = _resolve_material_instance(instance_path)
+    tex = unreal.EditorAssetLibrary.load_asset(texture_path)
+    if tex is None or not isinstance(tex, unreal.Texture):
+        raise ValueError(f"Asset is not a Texture: {texture_path}")
+    unreal.MaterialEditingLibrary.set_material_instance_texture_parameter_value(mi, param_name, tex)
+    unreal.EditorAssetLibrary.save_asset(instance_path)
+    return {"instance_path": instance_path, "param": param_name, "texture": texture_path}
+
+
+@_register("material_set_static_switch_param")
+def _cmd_material_set_static_switch_param(instance_path: str, param_name: str, value: bool) -> dict:
+    mi = _resolve_material_instance(instance_path)
+    unreal.MaterialEditingLibrary.set_material_instance_static_switch_parameter_value(mi, param_name, bool(value))
+    unreal.EditorAssetLibrary.save_asset(instance_path)
+    return {"instance_path": instance_path, "param": param_name, "value": bool(value)}
+
+
+# -- Niagara tools -----------------------------------------------------------
+
+
+def _find_actor(path_or_label: str):
+    actor_sub = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
+    for a in actor_sub.get_all_level_actors():
+        if a.get_path_name() == path_or_label or a.get_actor_label() == path_or_label:
+            return a
+    raise ValueError(f"Actor not found: {path_or_label}")
+
+
+def _find_niagara_component(actor) -> "unreal.NiagaraComponent":
+    if isinstance(actor, unreal.NiagaraActor):
+        comp = actor.get_editor_property("niagara_component")
+        if comp is not None:
+            return comp
+    comp = actor.get_component_by_class(unreal.NiagaraComponent)
+    if comp is None:
+        raise ValueError(f"Actor has no NiagaraComponent: {actor.get_path_name()}")
+    return comp
+
+
+def _resolve_niagara_system(system_path: str) -> "unreal.NiagaraSystem":
+    asset = unreal.EditorAssetLibrary.load_asset(system_path)
+    if asset is None:
+        raise ValueError(f"NiagaraSystem not found: {system_path}")
+    if not isinstance(asset, unreal.NiagaraSystem):
+        raise ValueError(f"Asset is not a NiagaraSystem: {system_path} (got {type(asset).__name__})")
+    return asset
+
+
+@_register("niagara_place_actor")
+def _cmd_niagara_place_actor(
+    system_path: str,
+    location: Optional[List[float]] = None,
+    rotation: Optional[List[float]] = None,
+    label: str = "",
+) -> dict:
+    system = _resolve_niagara_system(system_path)
+    loc = unreal.Vector(*location) if location else unreal.Vector(0, 0, 0)
+    rot = unreal.Rotator(*rotation) if rotation else unreal.Rotator(0, 0, 0)
+    actor_sub = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
+    actor = actor_sub.spawn_actor_from_class(unreal.NiagaraActor, loc, rot)
+    if actor is None:
+        raise RuntimeError(f"Failed to spawn NiagaraActor")
+    comp = actor.get_editor_property("niagara_component")
+    comp.set_asset(system, True)
+    if label:
+        actor.set_actor_label(label)
+    return {
+        "actor_path": actor.get_path_name(),
+        "label": actor.get_actor_label(),
+        "system_path": system.get_path_name(),
+        "location": _serialize(loc),
+    }
+
+
+@_register("niagara_set_system_asset")
+def _cmd_niagara_set_system_asset(actor_path: str, system_path: str) -> dict:
+    actor = _find_actor(actor_path)
+    comp = _find_niagara_component(actor)
+    system = _resolve_niagara_system(system_path)
+    comp.set_asset(system, True)
+    return {"actor_path": actor.get_path_name(), "system_path": system.get_path_name()}
+
+
+@_register("niagara_activate")
+def _cmd_niagara_activate(actor_path: str, reset: bool = False) -> dict:
+    actor = _find_actor(actor_path)
+    comp = _find_niagara_component(actor)
+    comp.activate(reset)
+    return {"actor_path": actor.get_path_name(), "activated": True, "reset": reset}
+
+
+@_register("niagara_deactivate")
+def _cmd_niagara_deactivate(actor_path: str) -> dict:
+    actor = _find_actor(actor_path)
+    comp = _find_niagara_component(actor)
+    comp.deactivate()
+    return {"actor_path": actor.get_path_name(), "deactivated": True}
+
+
+@_register("niagara_reset")
+def _cmd_niagara_reset(actor_path: str) -> dict:
+    actor = _find_actor(actor_path)
+    comp = _find_niagara_component(actor)
+    comp.reset_system()
+    return {"actor_path": actor.get_path_name(), "reset": True}
+
+
+@_register("niagara_set_float_param")
+def _cmd_niagara_set_float_param(actor_path: str, param_name: str, value: float) -> dict:
+    actor = _find_actor(actor_path)
+    comp = _find_niagara_component(actor)
+    comp.set_niagara_variable_float(param_name, float(value))
+    return {"actor_path": actor.get_path_name(), "param": param_name, "value": float(value)}
+
+
+@_register("niagara_set_int_param")
+def _cmd_niagara_set_int_param(actor_path: str, param_name: str, value: int) -> dict:
+    actor = _find_actor(actor_path)
+    comp = _find_niagara_component(actor)
+    comp.set_niagara_variable_int(param_name, int(value))
+    return {"actor_path": actor.get_path_name(), "param": param_name, "value": int(value)}
+
+
+@_register("niagara_set_bool_param")
+def _cmd_niagara_set_bool_param(actor_path: str, param_name: str, value: bool) -> dict:
+    actor = _find_actor(actor_path)
+    comp = _find_niagara_component(actor)
+    comp.set_niagara_variable_bool(param_name, bool(value))
+    return {"actor_path": actor.get_path_name(), "param": param_name, "value": bool(value)}
+
+
+@_register("niagara_set_vec3_param")
+def _cmd_niagara_set_vec3_param(
+    actor_path: str,
+    param_name: str,
+    x: float,
+    y: float,
+    z: float,
+) -> dict:
+    actor = _find_actor(actor_path)
+    comp = _find_niagara_component(actor)
+    comp.set_niagara_variable_vec3(param_name, unreal.Vector(float(x), float(y), float(z)))
+    return {"actor_path": actor.get_path_name(), "param": param_name, "value": [x, y, z]}
+
+
+@_register("niagara_set_color_param")
+def _cmd_niagara_set_color_param(
+    actor_path: str,
+    param_name: str,
+    r: float,
+    g: float,
+    b: float,
+    a: float = 1.0,
+) -> dict:
+    actor = _find_actor(actor_path)
+    comp = _find_niagara_component(actor)
+    comp.set_niagara_variable_linear_color(param_name, unreal.LinearColor(float(r), float(g), float(b), float(a)))
+    return {"actor_path": actor.get_path_name(), "param": param_name, "value": [r, g, b, a]}
+
+
+@_register("niagara_set_texture_param")
+def _cmd_niagara_set_texture_param(actor_path: str, param_name: str, texture_path: str) -> dict:
+    actor = _find_actor(actor_path)
+    comp = _find_niagara_component(actor)
+    tex = unreal.EditorAssetLibrary.load_asset(texture_path)
+    if tex is None or not isinstance(tex, unreal.Texture):
+        raise ValueError(f"Asset is not a Texture: {texture_path}")
+    comp.set_variable_texture(param_name, tex)
+    return {"actor_path": actor.get_path_name(), "param": param_name, "texture": texture_path}
+
+
+# -- Animation tools ---------------------------------------------------------
+
+
+def _resolve_anim_sequence_base(anim_path: str):
+    asset = unreal.EditorAssetLibrary.load_asset(anim_path)
+    if asset is None:
+        raise ValueError(f"Animation asset not found: {anim_path}")
+    if not isinstance(asset, unreal.AnimSequenceBase):
+        raise ValueError(f"Asset is not an AnimSequence/Montage: {anim_path} (got {type(asset).__name__})")
+    return asset
+
+
+def _resolve_notify_class(class_name: str, expect_state: bool = False):
+    cls = getattr(unreal, class_name, None)
+    if cls is None:
+        raise ValueError(f"Unknown notify class: {class_name!r}")
+    base = unreal.AnimNotifyState if expect_state else unreal.AnimNotify
+    if not issubclass(cls, base):
+        raise ValueError(f"{class_name} is not a subclass of {base.__name__}")
+    return cls
+
+
+@_register("anim_get_info")
+def _cmd_anim_get_info(anim_path: str) -> dict:
+    anim = _resolve_anim_sequence_base(anim_path)
+    skel = anim.get_editor_property("skeleton")
+    return {
+        "path": anim.get_path_name(),
+        "class": anim.get_class().get_name(),
+        "length_sec": anim.get_play_length(),
+        "skeleton": skel.get_path_name() if skel else None,
+    }
+
+
+@_register("anim_list_notify_tracks")
+def _cmd_anim_list_notify_tracks(anim_path: str) -> dict:
+    anim = _resolve_anim_sequence_base(anim_path)
+    names = unreal.AnimationLibrary.get_animation_notify_track_names(anim)
+    return {"tracks": [str(n) for n in names], "count": len(names)}
+
+
+@_register("anim_add_notify_track")
+def _cmd_anim_add_notify_track(
+    anim_path: str,
+    track_name: str,
+    color: Optional[List[float]] = None,
+) -> dict:
+    anim = _resolve_anim_sequence_base(anim_path)
+    rgba = color if color else [1.0, 1.0, 1.0, 1.0]
+    rgba = [float(v) for v in rgba] + [1.0] * (4 - len(rgba))
+    unreal.AnimationLibrary.add_animation_notify_track(anim, track_name, unreal.LinearColor(*rgba[:4]))
+    unreal.EditorAssetLibrary.save_asset(anim_path)
+    return {"path": anim_path, "track": track_name}
+
+
+@_register("anim_remove_all_notify_tracks")
+def _cmd_anim_remove_all_notify_tracks(anim_path: str) -> dict:
+    anim = _resolve_anim_sequence_base(anim_path)
+    unreal.AnimationLibrary.remove_all_animation_notify_tracks(anim)
+    unreal.EditorAssetLibrary.save_asset(anim_path)
+    return {"path": anim_path, "removed": True}
+
+
+@_register("anim_list_notifies")
+def _cmd_anim_list_notifies(anim_path: str) -> dict:
+    anim = _resolve_anim_sequence_base(anim_path)
+    events = unreal.AnimationLibrary.get_animation_notify_events(anim)
+    out = []
+    for e in events:
+        notify_obj = e.get_editor_property("notify")
+        notify_state = e.get_editor_property("notify_state_class")
+        entry = {
+            "name": str(e.get_editor_property("notify_name")),
+            "time": float(unreal.AnimationLibrary.get_anim_notify_event_trigger_time(e)),
+            "duration": float(unreal.AnimationLibrary.get_anim_notify_event_duration(e)),
+            "track_index": int(e.get_editor_property("track_index")),
+        }
+        if notify_obj is not None:
+            entry["notify_class"] = notify_obj.get_class().get_name()
+        if notify_state is not None:
+            entry["notify_state_class"] = notify_state.get_name()
+        out.append(entry)
+    return {"path": anim.get_path_name(), "notifies": out, "count": len(out)}
+
+
+@_register("anim_add_notify")
+def _cmd_anim_add_notify(
+    anim_path: str,
+    track_name: str,
+    time: float,
+    notify_class: str,
+) -> dict:
+    anim = _resolve_anim_sequence_base(anim_path)
+    cls = _resolve_notify_class(notify_class, expect_state=False)
+    notify = unreal.AnimationLibrary.add_animation_notify_event(anim, track_name, float(time), cls)
+    unreal.EditorAssetLibrary.save_asset(anim_path)
+    return {
+        "path": anim_path,
+        "track": track_name,
+        "time": float(time),
+        "notify_class": notify_class,
+        "created": notify is not None,
+    }
+
+
+@_register("anim_add_notify_state")
+def _cmd_anim_add_notify_state(
+    anim_path: str,
+    track_name: str,
+    time: float,
+    duration: float,
+    notify_state_class: str,
+) -> dict:
+    anim = _resolve_anim_sequence_base(anim_path)
+    cls = _resolve_notify_class(notify_state_class, expect_state=True)
+    notify = unreal.AnimationLibrary.add_animation_notify_state_event(
+        anim, track_name, float(time), float(duration), cls,
+    )
+    unreal.EditorAssetLibrary.save_asset(anim_path)
+    return {
+        "path": anim_path,
+        "track": track_name,
+        "time": float(time),
+        "duration": float(duration),
+        "notify_state_class": notify_state_class,
+        "created": notify is not None,
+    }
+
+
+@_register("anim_add_float_curve")
+def _cmd_anim_add_float_curve(anim_path: str, curve_name: str) -> dict:
+    anim = _resolve_anim_sequence_base(anim_path)
+    unreal.AnimationLibrary.add_curve(
+        anim, curve_name, unreal.RawCurveTrackTypes.RCT_FLOAT, False,
+    )
+    unreal.EditorAssetLibrary.save_asset(anim_path)
+    return {"path": anim_path, "curve": curve_name}
+
+
+@_register("anim_add_float_curve_key")
+def _cmd_anim_add_float_curve_key(
+    anim_path: str,
+    curve_name: str,
+    time: float,
+    value: float,
+) -> dict:
+    anim = _resolve_anim_sequence_base(anim_path)
+    unreal.AnimationLibrary.add_float_curve_key(anim, curve_name, float(time), float(value))
+    unreal.EditorAssetLibrary.save_asset(anim_path)
+    return {"path": anim_path, "curve": curve_name, "time": float(time), "value": float(value)}
+
+
+@_register("anim_create_montage")
+def _cmd_anim_create_montage(source_animation_path: str, asset_path: str) -> dict:
+    asset_name, package_path = _split_asset_path(asset_path)
+    if unreal.EditorAssetLibrary.does_asset_exist(asset_path):
+        raise ValueError(f"Asset already exists: {asset_path}")
+
+    src = unreal.EditorAssetLibrary.load_asset(source_animation_path)
+    if src is None or not isinstance(src, unreal.AnimSequence):
+        raise ValueError(f"Source is not an AnimSequence: {source_animation_path}")
+    skel = src.get_editor_property("skeleton")
+    if skel is None:
+        raise ValueError(f"Source AnimSequence has no skeleton: {source_animation_path}")
+
+    factory = unreal.AnimMontageFactory()
+    factory.set_editor_property("target_skeleton", skel)
+    factory.set_editor_property("source_animation", src)
+    tools = unreal.AssetToolsHelpers.get_asset_tools()
+    montage = tools.create_asset(asset_name, package_path, unreal.AnimMontage, factory)
+    if montage is None:
+        raise RuntimeError(f"Failed to create montage: {asset_path}")
+    unreal.EditorAssetLibrary.save_asset(asset_path)
+    return {
+        "montage_path": montage.get_path_name(),
+        "source": src.get_path_name(),
+        "skeleton": skel.get_path_name(),
+    }
+
+
+# -- Static Mesh tools ------------------------------------------------------
+
+_COLLISION_SHAPE_MAP = {
+    "box": "BOX",
+    "sphere": "SPHERE",
+    "capsule": "CAPSULE",
+    "ndop10_x": "NDOP10_X",
+    "ndop10_y": "NDOP10_Y",
+    "ndop10_z": "NDOP10_Z",
+    "ndop18": "NDOP18",
+    "ndop26": "NDOP26",
+}
+
+_UV_GEN_MAP = {"planar", "box", "cylindrical"}
+
+
+def _resolve_static_mesh(asset_path: str):
+    sm = unreal.EditorAssetLibrary.load_asset(asset_path)
+    if sm is None:
+        raise ValueError(f"Static mesh not found: {asset_path}")
+    if not isinstance(sm, unreal.StaticMesh):
+        raise ValueError(f"Asset is not a StaticMesh: {asset_path} (got {type(sm).__name__})")
+    return sm
+
+
+@_register("staticmesh_get_info")
+def _cmd_staticmesh_get_info(asset_path: str) -> dict:
+    sm = _resolve_static_mesh(asset_path)
+    sub = unreal.get_editor_subsystem(unreal.StaticMeshEditorSubsystem)
+    nanite = sub.get_nanite_settings(sm)
+    return {
+        "path": sm.get_path_name(),
+        "verts_lod0": sub.get_number_verts(sm, 0),
+        "material_slots": sub.get_number_materials(sm),
+        "lod_count": sub.get_lod_count(sm),
+        "uv_channels_lod0": sub.get_num_uv_channels(sm, 0),
+        "simple_collision_count": sub.get_simple_collision_count(sm),
+        "convex_collision_count": sub.get_convex_collision_count(sm),
+        "has_vertex_colors": sub.has_vertex_colors(sm),
+        "nanite_enabled": bool(nanite.get_editor_property("enabled")),
+        "nanite_fallback_percent": float(nanite.get_editor_property("fallback_percent_triangles")),
+    }
+
+
+@_register("staticmesh_enable_nanite")
+def _cmd_staticmesh_enable_nanite(
+    asset_path: str,
+    enabled: bool = True,
+    fallback_percent_triangles: float = 1.0,
+) -> dict:
+    sm = _resolve_static_mesh(asset_path)
+    sub = unreal.get_editor_subsystem(unreal.StaticMeshEditorSubsystem)
+    settings = sub.get_nanite_settings(sm)
+    settings.set_editor_property("enabled", bool(enabled))
+    settings.set_editor_property("fallback_percent_triangles", float(fallback_percent_triangles))
+    sub.set_nanite_settings(sm, settings, apply_changes=True)
+    unreal.EditorAssetLibrary.save_asset(asset_path)
+    return {
+        "path": asset_path,
+        "nanite_enabled": bool(enabled),
+        "fallback_percent_triangles": float(fallback_percent_triangles),
+    }
+
+
+@_register("staticmesh_set_lods")
+def _cmd_staticmesh_set_lods(
+    asset_path: str,
+    percent_triangles: List[float],
+    screen_sizes: Optional[List[float]] = None,
+    auto_compute_screen_size: bool = True,
+) -> dict:
+    sm = _resolve_static_mesh(asset_path)
+    sub = unreal.get_editor_subsystem(unreal.StaticMeshEditorSubsystem)
+
+    opts = unreal.EditorScriptingMeshReductionOptions()
+    opts.set_editor_property("auto_compute_lod_screen_size", bool(auto_compute_screen_size))
+
+    settings = []
+    for i, pct in enumerate(percent_triangles):
+        s = unreal.EditorScriptingMeshReductionSettings()
+        s.set_editor_property("percent_triangles", float(pct))
+        if screen_sizes and i < len(screen_sizes):
+            s.set_editor_property("screen_size", float(screen_sizes[i]))
+        settings.append(s)
+    opts.set_editor_property("reduction_settings", settings)
+
+    num = sub.set_lods(sm, opts)
+    unreal.EditorAssetLibrary.save_asset(asset_path)
+    return {"path": asset_path, "lod_count": int(num), "percent_triangles": percent_triangles}
+
+
+@_register("staticmesh_remove_lods")
+def _cmd_staticmesh_remove_lods(asset_path: str) -> dict:
+    sm = _resolve_static_mesh(asset_path)
+    sub = unreal.get_editor_subsystem(unreal.StaticMeshEditorSubsystem)
+    sub.remove_lods(sm)
+    unreal.EditorAssetLibrary.save_asset(asset_path)
+    return {"path": asset_path, "lod_count": sub.get_lod_count(sm)}
+
+
+@_register("staticmesh_add_collision")
+def _cmd_staticmesh_add_collision(asset_path: str, shape: str = "box") -> dict:
+    sm = _resolve_static_mesh(asset_path)
+    sub = unreal.get_editor_subsystem(unreal.StaticMeshEditorSubsystem)
+    shape_key = _COLLISION_SHAPE_MAP.get(shape.lower())
+    if shape_key is None:
+        raise ValueError(f"Unknown shape {shape!r}. Valid: {list(_COLLISION_SHAPE_MAP.keys())}")
+    shape_enum = getattr(unreal.ScriptingCollisionShapeType, shape_key)
+    count = sub.add_simple_collisions(sm, shape_enum)
+    unreal.EditorAssetLibrary.save_asset(asset_path)
+    return {"path": asset_path, "shape": shape, "collision_count": int(count)}
+
+
+@_register("staticmesh_remove_collisions")
+def _cmd_staticmesh_remove_collisions(asset_path: str) -> dict:
+    sm = _resolve_static_mesh(asset_path)
+    sub = unreal.get_editor_subsystem(unreal.StaticMeshEditorSubsystem)
+    sub.remove_collisions(sm)
+    unreal.EditorAssetLibrary.save_asset(asset_path)
+    return {"path": asset_path, "simple_collision_count": sub.get_simple_collision_count(sm)}
+
+
+@_register("staticmesh_generate_uv")
+def _cmd_staticmesh_generate_uv(
+    asset_path: str,
+    uv_type: str = "planar",
+    lod_index: int = 0,
+    uv_channel_index: int = 1,
+    position: Optional[List[float]] = None,
+    orientation: Optional[List[float]] = None,
+    tiling: Optional[List[float]] = None,
+) -> dict:
+    if uv_type.lower() not in _UV_GEN_MAP:
+        raise ValueError(f"uv_type must be one of {_UV_GEN_MAP}, got {uv_type!r}")
+    sm = _resolve_static_mesh(asset_path)
+    sub = unreal.get_editor_subsystem(unreal.StaticMeshEditorSubsystem)
+
+    pos = unreal.Vector2D(*(position or [0.0, 0.0]))
+    orient = unreal.Vector2D(*(orientation or [0.0, 0.0]))
+    til = unreal.Vector2D(*(tiling or [1.0, 1.0]))
+
+    t = uv_type.lower()
+    if t == "planar":
+        ok = sub.generate_planar_uv_channel(sm, lod_index, uv_channel_index, pos, orient, til)
+    elif t == "box":
+        ok = sub.generate_box_uv_channel(sm, lod_index, uv_channel_index, pos, orient, til)
+    else:
+        ok = sub.generate_cylindrical_uv_channel(sm, lod_index, uv_channel_index, pos, orient, til)
+    unreal.EditorAssetLibrary.save_asset(asset_path)
+    return {"path": asset_path, "uv_type": t, "channel": uv_channel_index, "lod": lod_index, "ok": bool(ok)}
+
+
+# -- Asset Pipeline tools ---------------------------------------------------
+
+
+@_register("asset_batch_rename")
+def _cmd_asset_batch_rename(renames: List[Dict[str, str]]) -> dict:
+    tools = unreal.AssetToolsHelpers.get_asset_tools()
+    rename_data = []
+    for r in renames:
+        old_path = r["old_path"]
+        new_path = r["new_path"]
+        asset = unreal.EditorAssetLibrary.load_asset(old_path)
+        if asset is None:
+            raise ValueError(f"Asset not found: {old_path}")
+        new_name_parts = new_path.rsplit("/", 1)
+        if len(new_name_parts) != 2:
+            raise ValueError(f"Invalid new_path: {new_path}")
+        ad = unreal.AssetRenameData()
+        ad.set_editor_property("asset", asset)
+        ad.set_editor_property("new_package_path", new_name_parts[0])
+        ad.set_editor_property("new_name", new_name_parts[1])
+        rename_data.append(ad)
+    tools.rename_assets(rename_data)
+    return {"renamed_count": len(rename_data), "renames": renames}
+
+
+@_register("asset_set_metadata")
+def _cmd_asset_set_metadata(asset_path: str, tag: str, value: str) -> dict:
+    asset = unreal.EditorAssetLibrary.load_asset(asset_path)
+    if asset is None:
+        raise ValueError(f"Asset not found: {asset_path}")
+    unreal.EditorAssetLibrary.set_metadata_tag(asset, tag, value)
+    unreal.EditorAssetLibrary.save_asset(asset_path)
+    return {"path": asset_path, "tag": tag, "value": value}
+
+
+@_register("asset_get_metadata")
+def _cmd_asset_get_metadata(asset_path: str) -> dict:
+    asset = unreal.EditorAssetLibrary.load_asset(asset_path)
+    if asset is None:
+        raise ValueError(f"Asset not found: {asset_path}")
+    raw = unreal.EditorAssetLibrary.get_metadata_tag_values(asset)
+    tags = {str(k): str(v) for k, v in (raw or {}).items()}
+    return {"path": asset_path, "tags": tags, "count": len(tags)}
+
+
+@_register("asset_remove_metadata")
+def _cmd_asset_remove_metadata(asset_path: str, tag: str) -> dict:
+    asset = unreal.EditorAssetLibrary.load_asset(asset_path)
+    if asset is None:
+        raise ValueError(f"Asset not found: {asset_path}")
+    unreal.EditorAssetLibrary.remove_metadata_tag(asset, tag)
+    unreal.EditorAssetLibrary.save_asset(asset_path)
+    return {"path": asset_path, "tag": tag, "removed": True}
+
+
+@_register("asset_find_referencers")
+def _cmd_asset_find_referencers(asset_path: str) -> dict:
+    refs = unreal.EditorAssetLibrary.find_package_referencers_for_asset(asset_path)
+    refs_list = [str(r) for r in refs]
+    return {"path": asset_path, "referencers": refs_list, "count": len(refs_list)}
+
+
+@_register("asset_find_dependencies")
+def _cmd_asset_find_dependencies(asset_path: str) -> dict:
+    registry = unreal.AssetRegistryHelpers.get_asset_registry()
+    pkg = asset_path.split(".")[0] if "." in asset_path else asset_path
+    deps = registry.get_dependencies(pkg)
+    deps_list = [str(d) for d in (deps or [])]
+    return {"path": asset_path, "dependencies": deps_list, "count": len(deps_list)}
+
+
+@_register("asset_find_unused")
+def _cmd_asset_find_unused(directory: str = "/Game/", class_filter: str = "") -> dict:
+    paths = unreal.EditorAssetLibrary.list_assets(directory, recursive=True, include_folder=False)
+    unused = []
+    for p in paths:
+        if class_filter:
+            data = unreal.EditorAssetLibrary.find_asset_data(p)
+            if data is None:
+                continue
+            cls_name = str(data.asset_class_path.asset_name) if hasattr(data, "asset_class_path") else str(getattr(data, "asset_class", ""))
+            if cls_name != class_filter:
+                continue
+        refs = unreal.EditorAssetLibrary.find_package_referencers_for_asset(p)
+        if not refs:
+            unused.append(p)
+    return {"directory": directory, "class_filter": class_filter, "unused": unused, "count": len(unused)}
+
+
+# -- DataTable tools --------------------------------------------------------
+
+
+def _resolve_data_table(asset_path: str):
+    dt = unreal.EditorAssetLibrary.load_asset(asset_path)
+    if dt is None:
+        raise ValueError(f"DataTable not found: {asset_path}")
+    if not isinstance(dt, unreal.DataTable):
+        raise ValueError(f"Asset is not a DataTable: {asset_path} (got {type(dt).__name__})")
+    return dt
+
+
+@_register("datatable_info")
+def _cmd_datatable_info(asset_path: str) -> dict:
+    dt = _resolve_data_table(asset_path)
+    struct = dt.get_row_struct()
+    return {
+        "path": dt.get_path_name(),
+        "row_struct": struct.get_path_name() if struct else None,
+        "row_names": [str(n) for n in dt.get_row_names()],
+        "column_names": [str(c) for c in dt.get_column_names()],
+        "row_count": len(dt.get_row_names()),
+    }
+
+
+@_register("datatable_export_json")
+def _cmd_datatable_export_json(asset_path: str) -> dict:
+    dt = _resolve_data_table(asset_path)
+    return {"path": dt.get_path_name(), "json": dt.export_to_json_string()}
+
+
+@_register("datatable_export_csv")
+def _cmd_datatable_export_csv(asset_path: str) -> dict:
+    dt = _resolve_data_table(asset_path)
+    return {"path": dt.get_path_name(), "csv": dt.export_to_csv_string()}
+
+
+@_register("datatable_import_json")
+def _cmd_datatable_import_json(asset_path: str, json_string: str) -> dict:
+    dt = _resolve_data_table(asset_path)
+    ok = dt.fill_from_json_string(json_string)
+    unreal.EditorAssetLibrary.save_asset(asset_path)
+    return {"path": asset_path, "ok": bool(ok), "row_count": len(dt.get_row_names())}
+
+
+@_register("datatable_import_csv")
+def _cmd_datatable_import_csv(asset_path: str, csv_string: str) -> dict:
+    dt = _resolve_data_table(asset_path)
+    ok = dt.fill_from_csv_string(csv_string)
+    unreal.EditorAssetLibrary.save_asset(asset_path)
+    return {"path": asset_path, "ok": bool(ok), "row_count": len(dt.get_row_names())}
+
+
+@_register("datatable_get_row")
+def _cmd_datatable_get_row(asset_path: str, row_name: str) -> dict:
+    dt = _resolve_data_table(asset_path)
+    full = dt.export_to_json_string()
+    import json as _json
+    rows = _json.loads(full)
+    if isinstance(rows, list):
+        for entry in rows:
+            if str(entry.get("Name")) == row_name or str(entry.get("---")) == row_name:
+                return {"path": asset_path, "row_name": row_name, "row": entry}
+    elif isinstance(rows, dict):
+        if row_name in rows:
+            return {"path": asset_path, "row_name": row_name, "row": rows[row_name]}
+    raise ValueError(f"Row {row_name!r} not found in {asset_path}")
+
+
+# -- Validation tools -------------------------------------------------------
+
+
+def _build_validator_settings(capture_logs: bool = True, load_assets: bool = True):
+    s = unreal.ValidateAssetsSettings()
+    s.set_editor_property("capture_logs_during_validation", capture_logs)
+    s.set_editor_property("load_assets_for_validation", load_assets)
+    s.set_editor_property("show_if_no_failures", False)
+    return s
+
+
+def _run_validation(asset_data_list) -> dict:
+    sub = unreal.get_editor_subsystem(unreal.EditorValidatorSubsystem)
+    settings = _build_validator_settings()
+    num_failed, results = sub.validate_assets_with_settings(asset_data_list, settings)
+    out = {
+        "asset_count": len(list(asset_data_list)) if hasattr(asset_data_list, "__iter__") else 0,
+        "num_failed": int(num_failed),
+    }
+    try:
+        out["num_invalid"] = int(results.get_editor_property("num_invalid"))
+        out["num_valid"] = int(results.get_editor_property("num_valid"))
+        out["num_warnings"] = int(results.get_editor_property("num_warnings"))
+    except Exception:
+        pass
+    return out
+
+
+@_register("validate_asset")
+def _cmd_validate_asset(asset_path: str) -> dict:
+    data = unreal.EditorAssetLibrary.find_asset_data(asset_path)
+    if data is None:
+        raise ValueError(f"Asset not found: {asset_path}")
+    out = _run_validation([data])
+    out["path"] = asset_path
+    return out
+
+
+@_register("validate_folder")
+def _cmd_validate_folder(directory: str = "/Game/", recursive: bool = True) -> dict:
+    paths = unreal.EditorAssetLibrary.list_assets(directory, recursive=recursive, include_folder=False)
+    datas = []
+    for p in paths:
+        d = unreal.EditorAssetLibrary.find_asset_data(p)
+        if d is not None:
+            datas.append(d)
+    out = _run_validation(datas)
+    out["directory"] = directory
+    out["scanned"] = len(datas)
+    return out
+
+
+@_register("validate_selected")
+def _cmd_validate_selected() -> dict:
+    selected = unreal.EditorUtilityLibrary.get_selected_asset_data()
+    out = _run_validation(list(selected))
+    out["selected_count"] = len(list(selected))
+    return out
+
+
+# -- Screenshot -------------------------------------------------------------
+
+
+@_register("screenshot_start")
+def _cmd_screenshot_start(
+    width: int = 1920,
+    height: int = 1080,
+    force_game_view: bool = False,
+) -> dict:
+    """Fire a viewport screenshot. Non-blocking — returns expected path.
+
+    The external MCP process is responsible for polling the filesystem for
+    the file to appear (the editor render thread writes asynchronously).
+    """
+    tmp_name = f"_mcp_{int(time.time() * 1000)}.png"
+    unreal.AutomationLibrary.take_high_res_screenshot(
+        int(width), int(height), tmp_name, force_game_view=bool(force_game_view),
+    )
+    saved_dir = os.path.join(unreal.Paths.project_saved_dir(), "Screenshots", "WindowsEditor")
+    return {
+        "expected_path": os.path.join(saved_dir, tmp_name),
+        "tmp_name": tmp_name,
+        "width": int(width),
+        "height": int(height),
+    }
+
+
+@_register("anim_create_blendspace")
+def _cmd_anim_create_blendspace(
+    skeleton_path: str,
+    asset_path: str,
+    blendspace_type: str = "2D",
+) -> dict:
+    asset_name, package_path = _split_asset_path(asset_path)
+    if unreal.EditorAssetLibrary.does_asset_exist(asset_path):
+        raise ValueError(f"Asset already exists: {asset_path}")
+
+    skel = unreal.EditorAssetLibrary.load_asset(skeleton_path)
+    if skel is None or not isinstance(skel, unreal.Skeleton):
+        raise ValueError(f"Asset is not a Skeleton: {skeleton_path}")
+
+    t = blendspace_type.upper()
+    if t == "1D":
+        asset_class = unreal.BlendSpace1D
+    elif t == "2D":
+        asset_class = unreal.BlendSpace
+    else:
+        raise ValueError(f"blendspace_type must be '1D' or '2D', got {blendspace_type!r}")
+
+    factory = unreal.BlendSpaceFactoryNew()
+    factory.set_editor_property("target_skeleton", skel)
+    tools = unreal.AssetToolsHelpers.get_asset_tools()
+    bs = tools.create_asset(asset_name, package_path, asset_class, factory)
+    if bs is None:
+        raise RuntimeError(f"Failed to create blendspace: {asset_path}")
+    unreal.EditorAssetLibrary.save_asset(asset_path)
+    return {
+        "blendspace_path": bs.get_path_name(),
+        "type": t,
+        "skeleton": skel.get_path_name(),
+    }
+
+
+# -- Device tools (Verse @editable) ------------------------------------------
+
+
+def _find_actor(identifier: str) -> Optional[unreal.Actor]:
+    """Find an actor by path, label, or name. Returns None if not found."""
+    actor_sub = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
+    for a in actor_sub.get_all_level_actors():
+        if (
+            a.get_path_name() == identifier
+            or a.get_actor_label() == identifier
+            or a.get_name() == identifier
+        ):
+            return a
+    return None
+
+
+# Built-in actor properties we should hide from Verse @editable listing.
+_BUILTIN_ACTOR_PROPS = {
+    "root_component", "tags", "actor_guid", "default_updated_component",
+    "primary_actor_tick", "hidden", "net_driver_name", "replicates",
+    "instigator", "owner", "auto_destroy_when_finished", "can_be_damaged",
+    "always_relevant", "only_relevant_to_owner", "net_load_on_client",
+    "net_use_owner_relevancy", "net_dormancy", "replicating_movement",
+    "input_priority", "input", "spawn_collision_handling_method",
+    "initial_life_span", "custom_time_dilation", "bring_to_front_on_selected",
+    "actor_label", "folder_path", "layers", "pivot_offset", "data_layers",
+    "content_bundle_guid", "external_data_layer_asset", "is_spatially_loaded",
+    "instance_guid", "is_editor_only_actor", "rayhaven_tags",
+}
+
+
+def _list_verse_editables(actor: unreal.Actor) -> List[Dict[str, Any]]:
+    """Enumerate Verse @editable properties on an actor.
+
+    Uses dir() on the actor class and filters out built-in UActor properties.
+    Each entry: {name, current_value, class}.
+    """
+    results: List[Dict[str, Any]] = []
+    seen = set()
+    for name in sorted(dir(actor)):
+        if (
+            name.startswith("_")
+            or name in _BUILTIN_ACTOR_PROPS
+            or name in seen
+        ):
+            continue
+        if callable(getattr(type(actor), name, None)):
+            continue
+        seen.add(name)
+        try:
+            val = actor.get_editor_property(name)
+        except Exception:
+            continue
+        if _is_unreal_array(val):
+            inner = _sniff_array_inner_type(val)
+            value_type = f"array:{inner}"
+            current_value = [_serialize(v) for v in val]
+        else:
+            value_type = type(val).__name__
+            current_value = _serialize(val)
+        results.append({
+            "name": name,
+            "current_value": current_value,
+            "value_type": value_type,
+        })
+    return results
+
+
+def _is_unreal_array(obj: Any) -> bool:
+    """True if obj is an unreal.Array (TArray)."""
+    array_cls = getattr(unreal, "Array", None)
+    if array_cls is not None and isinstance(obj, array_cls):
+        return True
+    return type(obj).__name__ == "Array" and type(obj).__module__.startswith("unreal")
+
+
+def _sniff_array_inner_type(arr: Any) -> str:
+    """Infer the inner type of a (possibly empty) unreal.Array.
+
+    Uses the first element's type when populated. Returns "unknown" otherwise.
+    Result is a value_type string usable in `array:INNER` hints.
+    """
+    try:
+        first = next(iter(arr))
+    except (StopIteration, TypeError):
+        return "unknown"
+    if isinstance(first, bool):
+        return "bool"
+    if isinstance(first, int):
+        return "int"
+    if isinstance(first, float):
+        return "float"
+    if isinstance(first, str):
+        return "string"
+    if isinstance(first, unreal.Vector):
+        return "vector"
+    if isinstance(first, unreal.Rotator):
+        return "rotator"
+    if first is None or isinstance(first, unreal.Actor):
+        return "actor"
+    return "unknown"
+
+
+def _coerce_editable_value(
+    actor: unreal.Actor, field: str, value: Any, value_type: str
+) -> Any:
+    """Coerce a raw JSON value into the type expected by the UProperty.
+
+    value_type hints:
+        "int", "float", "bool", "string" — primitive coercion
+        "actor"                           — resolve via _find_actor(value)
+        "vector"                          — [x,y,z] → unreal.Vector
+        "rotator"                         — [pitch,yaw,roll] → unreal.Rotator
+        "array:INNER"                     — list of INNER (e.g. "array:actor",
+                                            "array:int"). Empty list allowed.
+        "auto" (default)                  — infer from current field value
+    """
+    if value_type == "auto":
+        try:
+            current = actor.get_editor_property(field)
+        except Exception:
+            current = None
+        if isinstance(current, bool):
+            value_type = "bool"
+        elif isinstance(current, int):
+            value_type = "int"
+        elif isinstance(current, float):
+            value_type = "float"
+        elif isinstance(current, str):
+            value_type = "string"
+        elif isinstance(current, unreal.Vector):
+            value_type = "vector"
+        elif isinstance(current, unreal.Rotator):
+            value_type = "rotator"
+        elif _is_unreal_array(current):
+            inner = _sniff_array_inner_type(current)
+            if inner == "unknown":
+                raise ValueError(
+                    f"Cannot auto-infer element type for empty array field {field!r}. "
+                    f"Pass value_type='array:INNER' explicitly (e.g. 'array:actor')."
+                )
+            value_type = f"array:{inner}"
+        elif current is None or isinstance(current, unreal.Actor):
+            value_type = "actor"
+        else:
+            value_type = "string"
+
+    if value_type.startswith("array:"):
+        inner = value_type.split(":", 1)[1]
+        if not inner:
+            raise ValueError("array value_type requires inner type, e.g. 'array:actor'")
+        if not isinstance(value, (list, tuple)):
+            raise ValueError(
+                f"array value must be a list, got {type(value).__name__}"
+            )
+        return [_coerce_editable_value(actor, field, item, inner) for item in value]
+
+    if value_type == "int":
+        return int(value)
+    if value_type == "float":
+        return float(value)
+    if value_type == "bool":
+        if isinstance(value, str):
+            return value.lower() in ("true", "1", "yes")
+        return bool(value)
+    if value_type == "string":
+        return str(value)
+    if value_type == "vector":
+        if isinstance(value, dict):
+            return unreal.Vector(float(value["x"]), float(value["y"]), float(value["z"]))
+        return unreal.Vector(float(value[0]), float(value[1]), float(value[2]))
+    if value_type == "rotator":
+        if isinstance(value, dict):
+            return unreal.Rotator(float(value["pitch"]), float(value["yaw"]), float(value["roll"]))
+        return unreal.Rotator(float(value[0]), float(value[1]), float(value[2]))
+    if value_type == "actor":
+        if value is None or value == "":
+            return None
+        resolved = _find_actor(str(value))
+        if resolved is None:
+            raise ValueError(f"Referenced actor not found: {value!r}")
+        return resolved
+    raise ValueError(f"Unknown value_type: {value_type!r}")
+
+
+@_register("device_list_editables")
+def _cmd_device_list_editables(actor_path: str) -> dict:
+    """List all @editable (UProperty) fields on a creative_device actor.
+
+    Returns the actor's identity plus a list of {name, current_value, value_type}
+    entries — everything exposed in the Details panel that isn't a built-in
+    Actor property. Use this before device_set_editable to discover field names.
+    """
+    actor = _find_actor(actor_path)
+    if actor is None:
+        raise ValueError(f"Actor not found: {actor_path}")
+    return {
+        "actor": _serialize_actor(actor),
+        "editables": _list_verse_editables(actor),
+    }
+
+
+@_register("device_set_editable")
+def _cmd_device_set_editable(
+    actor_path: str,
+    field: str,
+    value: Any,
+    value_type: str = "auto",
+) -> dict:
+    """Set a single Verse @editable field on a creative_device actor.
+
+    Coerces ``value`` into the type UEFN expects. ``value_type`` hints the
+    coercion: 'int' | 'float' | 'bool' | 'string' | 'actor' | 'vector' |
+    'rotator' | 'auto'. For 'actor', ``value`` is the label/path of another
+    actor in the level and is resolved to an object reference before assignment.
+    """
+    actor = _find_actor(actor_path)
+    if actor is None:
+        raise ValueError(f"Actor not found: {actor_path}")
+
+    coerced = _coerce_editable_value(actor, field, value, value_type)
+    try:
+        actor.set_editor_property(field, coerced)
+    except Exception as e:
+        raise RuntimeError(
+            f"set_editor_property({field!r}) failed on {actor.get_actor_label()}: {e}"
+        ) from e
+
+    try:
+        new_val = actor.get_editor_property(field)
+    except Exception:
+        new_val = coerced
+
+    return {
+        "actor": actor.get_actor_label(),
+        "actor_path": actor.get_path_name(),
+        "field": field,
+        "value_type": value_type,
+        "new_value": _serialize(new_val),
+    }
+
+
+@_register("device_set_editables_bulk")
+def _cmd_device_set_editables_bulk(
+    actor_path: str,
+    fields: List[Dict[str, Any]],
+) -> dict:
+    """Set multiple Verse @editable fields on one actor in a single call.
+
+    ``fields`` is a list of {name, value, value_type?} entries. Per-field
+    failures are captured and reported in ``results`` — the call does NOT abort
+    on first error, letting the agent see which fields succeeded.
+    """
+    actor = _find_actor(actor_path)
+    if actor is None:
+        raise ValueError(f"Actor not found: {actor_path}")
+
+    results: List[Dict[str, Any]] = []
+    for entry in fields:
+        name = entry.get("name") or entry.get("field")
+        if not name:
+            results.append({"field": None, "ok": False, "error": "missing 'name'"})
+            continue
+        value = entry.get("value")
+        value_type = entry.get("value_type", "auto")
+        try:
+            coerced = _coerce_editable_value(actor, name, value, value_type)
+            actor.set_editor_property(name, coerced)
+            try:
+                new_val = actor.get_editor_property(name)
+            except Exception:
+                new_val = coerced
+            results.append({
+                "field": name,
+                "ok": True,
+                "value_type": value_type,
+                "new_value": _serialize(new_val),
+            })
+        except Exception as e:
+            results.append({"field": name, "ok": False, "error": str(e)})
+
+    ok_count = sum(1 for r in results if r["ok"])
+    return {
+        "actor": actor.get_actor_label(),
+        "actor_path": actor.get_path_name(),
+        "ok_count": ok_count,
+        "fail_count": len(results) - ok_count,
+        "results": results,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Playtest (Play-In-Editor)
+# ---------------------------------------------------------------------------
+
+
+def _level_editor_subsystem():
+    return unreal.get_editor_subsystem(unreal.LevelEditorSubsystem)
+
+
+@_register("playtest_start")
+def _cmd_playtest_start() -> dict:
+    """Start a Play-In-Editor session (equivalent to the UEFN Play button)."""
+    sub = _level_editor_subsystem()
+    if sub.is_in_play_in_editor():
+        return {"status": "already_running"}
+    sub.editor_request_begin_play()
+    return {"status": "started"}
+
+
+@_register("playtest_stop")
+def _cmd_playtest_stop() -> dict:
+    """End the current Play-In-Editor session."""
+    sub = _level_editor_subsystem()
+    if not sub.is_in_play_in_editor():
+        return {"status": "not_running"}
+    sub.editor_request_end_play()
+    return {"status": "stopping"}
+
+
+@_register("playtest_status")
+def _cmd_playtest_status() -> dict:
+    """Report whether a PIE session is currently running."""
+    sub = _level_editor_subsystem()
+    return {"in_pie": bool(sub.is_in_play_in_editor())}
+
+
+# ---------------------------------------------------------------------------
+# Mesh scatter
+# ---------------------------------------------------------------------------
+
+
+@_register("mesh_scatter")
+def _cmd_mesh_scatter(
+    static_mesh_path: str,
+    min_xyz: List[float],
+    max_xyz: List[float],
+    count: int = 100,
+    seed: int = 0,
+    scale_min: float = 1.0,
+    scale_max: float = 1.0,
+    yaw_random: bool = True,
+    pitch_random: bool = False,
+    clearance_radius: float = 0.0,
+    folder_path: str = "",
+    max_attempts: int = 0,
+    material_path: str = "",
+    collision_profile: str = "",
+) -> dict:
+    """Scatter StaticMeshActor instances randomly inside an axis-aligned box.
+
+    Deterministic when ``seed`` is non-zero. ``clearance_radius`` enforces a
+    minimum XY distance between placed instances via brute-force rejection —
+    practical up to a few hundred points. For ground projection, use
+    execute_python with a dedicated line trace.
+
+    Returns {placed, attempted, skipped_clearance, actors: [{label, path}]}.
+    """
+    import random
+
+    mesh = unreal.EditorAssetLibrary.load_asset(static_mesh_path)
+    if mesh is None:
+        raise ValueError(f"static_mesh_path not found: {static_mesh_path}")
+    if not isinstance(mesh, unreal.StaticMesh):
+        raise ValueError(f"Asset is not a StaticMesh: {static_mesh_path}")
+    if len(min_xyz) != 3 or len(max_xyz) != 3:
+        raise ValueError("min_xyz and max_xyz must be 3-element lists")
+
+    mat_override = None
+    if material_path:
+        mat_override = unreal.EditorAssetLibrary.load_asset(material_path)
+        if mat_override is None:
+            raise ValueError(f"material_path not found: {material_path}")
+
+    rng = random.Random(seed) if seed else random.Random()
+    placed = []
+    placed_xy: List = []
+    skipped_clearance = 0
+    attempts = 0
+    cap = max_attempts if max_attempts > 0 else max(count * 10, 50)
+    c2 = clearance_radius * clearance_radius
+
+    while len(placed) < count and attempts < cap:
+        attempts += 1
+        x = rng.uniform(min_xyz[0], max_xyz[0])
+        y = rng.uniform(min_xyz[1], max_xyz[1])
+        z = rng.uniform(min_xyz[2], max_xyz[2])
+
+        if clearance_radius > 0.0:
+            conflict = False
+            for px, py in placed_xy:
+                dx = x - px
+                dy = y - py
+                if dx * dx + dy * dy < c2:
+                    conflict = True
+                    break
+            if conflict:
+                skipped_clearance += 1
+                continue
+
+        yaw = rng.uniform(0.0, 360.0) if yaw_random else 0.0
+        pitch = rng.uniform(-15.0, 15.0) if pitch_random else 0.0
+        loc = unreal.Vector(x, y, z)
+        rot = unreal.Rotator(pitch=pitch, yaw=yaw, roll=0.0)
+        actor = unreal.EditorLevelLibrary.spawn_actor_from_object(mesh, loc, rot)
+        if actor is None:
+            continue
+        s = rng.uniform(scale_min, scale_max)
+        actor.set_actor_scale3d(unreal.Vector(s, s, s))
+        if folder_path:
+            actor.set_folder_path(folder_path)
+        smc = actor.get_component_by_class(unreal.StaticMeshComponent)
+        if smc is not None:
+            if mat_override is not None:
+                smc.set_material(0, mat_override)
+            if collision_profile:
+                smc.set_collision_profile_name(collision_profile)
+        placed.append({
+            "label": actor.get_actor_label(),
+            "path": actor.get_path_name(),
+        })
+        placed_xy.append((x, y))
+
+    return {
+        "placed": len(placed),
+        "attempted": attempts,
+        "skipped_clearance": skipped_clearance,
+        "actors": placed,
+    }
 
 
 # ---------------------------------------------------------------------------
