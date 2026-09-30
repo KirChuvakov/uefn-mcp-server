@@ -1743,15 +1743,17 @@ verse_lsp_service.register(mcp)
 
 
 # ---------------------------------------------------------------------------
-# Desktop control (host side, Windows)
+# Desktop control & UEFN session (host side, Windows)
 # ---------------------------------------------------------------------------
 # These run in this process (pure ctypes): window listing, GDI screenshots and
-# SendInput input with safety rails.
+# SendInput input with safety rails, plus UEFN launch / HUB / readiness helpers.
 # Importing desktop_control makes this process per-monitor DPI aware (V2).
 
 import desktop_control
+import uefn_session
 
 desktop_control.register(mcp)
+uefn_session.register(mcp)
 
 
 # ---------------------------------------------------------------------------
