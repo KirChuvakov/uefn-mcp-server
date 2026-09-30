@@ -1730,6 +1730,17 @@ def verse_check_editable_coverage(
 
 
 # ---------------------------------------------------------------------------
+# Verse build (workflow socket)
+# ---------------------------------------------------------------------------
+# These talk to UEFN directly (TCP 1962) — they do NOT go through the editor
+# HTTP listener, so they work even without it.
+
+import verse_workflow
+
+verse_workflow.register(mcp)
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
