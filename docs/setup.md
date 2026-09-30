@@ -3,33 +3,60 @@
 ## Prerequisites
 
 - UEFN editor with Python scripting enabled via **Project Settings**
-- Python 3.10+ installed on your system (for the MCP server process)
+- Python 3.10+ installed on your system (for the MCP server process) — a real install, not the Microsoft Store alias
 - Claude Code CLI installed
+- Optional: the `epicgames.verse` VS Code extension (for the Verse navigation tools)
 
-## Step 0: Let Claude do the setup
+## Step 0: `setup.ps1` (the onboarding step)
 
-Open Claude Code and ask: *"Help me set up UEFN MCP server"* — it will install dependencies, create config files, and walk you through the rest.
+From the clone (idempotent; `-DryRun` shows what it would do and changes nothing):
 
-If you prefer to do it manually, follow the steps below.
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\setup.ps1 -DryRun
+powershell -NoProfile -ExecutionPolicy Bypass -File .\setup.ps1 -ScheduleHook -Project "<path>\<Island>.uefnproject"
+```
 
-## Step 1: Enable Python in UEFN
+It finds a real Python 3.10+ (never the Microsoft Store alias), installs `requirements.txt`, sets the user variable
+`UEFN_MCP_PATH`, runs `ensure_mcp_hook.ps1` (listener autostart; `-ScheduleHook` adds the hourly task that re-adds the
+hook after Fortnite updates), reports the UEFN install, "Load on Startup" and whether Python is enabled for the
+project, and prints what is left. Options: `-WithTray`, `-WithMss`, `-EnableLoadLastProject` (explicit opt-in: UEFN
+reopens the last project at startup instead of showing the HUB; UEFN must be closed), `-RegisterClaude`,
+`-Python <python.exe>`, `-SkipPip`. Run it from an elevated PowerShell once if `Program Files` is write-protected (the
+hook step says so).
+
+What it cannot do for you: enable Python in each project (Step 2) and approve the server in Claude Code (Step 5).
+Steps 1-6 below are the manual equivalent. Or ask Claude Code: *"Help me set up UEFN MCP server"*.
+
+## Step 1: Clone and set `UEFN_MCP_PATH`
+
+```powershell
+git clone https://github.com/EndoWorldsHub/uefn-mcp-server
+[Environment]::SetEnvironmentVariable('UEFN_MCP_PATH', (Resolve-Path .\uefn-mcp-server).Path, 'User')
+```
+
+The clone can live anywhere. Project configs refer to it only through `UEFN_MCP_PATH`, so they contain no
+machine-specific path. Restart terminals and Claude Code afterwards so they see the variable.
+
+## Step 2: Enable Python in UEFN
 
 1. Open your project in UEFN
 2. Go to **Project > Project Settings**
 3. Search for **Python** and check the box for **Python Editor Script Plugin**
 
-After this, you should see **Tools > Execute Python Script** in the menu bar.
+After this, you should see **Tools > Execute Python Script** in the menu bar. The setting is stored per project and
+per user (`EnablePythonLocallyPerProject` in UEFN's `EditorPerProjectUserSettings.ini`); a project without it never
+starts Python, so the listener cannot autostart there.
 
-## Step 2: Start the Listener
+## Step 3: Start the Listener
 
-### Manual start (recommended for first use)
+### Manual start (always works)
 
 1. In UEFN, go to **Tools > Execute Python Script**
-2. Navigate to and select `uefn_listener.py`
+2. Navigate to and select `uefn_listener.py` in the clone
 3. A **status window** will appear:
 
 ```
-UEFN MCP Listener  v0.2.0
+UEFN MCP Listener  v0.3.2
 ● Listener: Running
 ● MCP Server: Connecting...
 
@@ -39,26 +66,29 @@ Requests  0
 ...
 ```
 
-The window shows real-time status — you don't need to check the Output Log.
-You can safely close the window; the listener continues running in the background.
+The window shows real-time status — you don't need to check the Output Log. Closing the window hides it; the
+listener keeps running, and the tray icon (if `vendor/` is populated, see the README) brings the window back.
 
-### Auto-start on editor launch
+### Auto-start on project open
 
-Copy both files to your UEFN project's `Content/Python/` directory:
+UEFN runs `init_unreal.py` only from a fixed whitelist of engine plugin folders. Copying files into the project's
+`Content/Python/` does not work, and `.py` files inside a UEFN project make session upload fail with
+`[ContainsPythonData]`. Instead, run the hook installer once:
 
-```bash
-cp uefn_listener.py  <YourUEFNProject>/Content/Python/uefn_listener.py
-cp init_unreal.py     <YourUEFNProject>/Content/Python/init_unreal.py
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File "$env:UEFN_MCP_PATH\ensure_mcp_hook.ps1"
 ```
 
-The listener will start automatically every time you open the project in UEFN.
+It appends a marked hook to Epic's `EditorToolset` `init_unreal.py` that runs this repo's `init_unreal.py` at every
+project open. Fortnite updates remove the hook again: register the script as an hourly scheduled task (README,
+"Auto-start"). Check the Output Log after a project opens for `[MCP] Auto-started on port 8765`.
 
-## Step 3: Install MCP SDK
+## Step 4: Install MCP SDK
 
 On your system (not inside UEFN):
 
 ```bash
-pip install mcp
+pip install -r requirements.txt
 ```
 
 Verify:
@@ -66,37 +96,39 @@ Verify:
 python -c "from mcp.server.fastmcp import FastMCP; print('OK')"
 ```
 
-## Step 4: Configure Claude Code
+## Step 5: Configure Claude Code
 
-### Option A: Project-level config (recommended)
+### Option A: Project-level config
 
-Create `.mcp.json` in your project root:
-
-```json
-{
-  "mcpServers": {
-    "uefn": {
-      "command": "python",
-      "args": ["/path/to/uefn-mcp-server/mcp_server.py"]
-    }
-  }
-}
-```
-
-### Option B: Global config
-
-Add to `~/.claude/settings.json` under `mcpServers`:
+Create `.mcp.json` in your project root. Claude Code expands `${VAR}` and `${VAR:-default}` in it:
 
 ```json
 {
   "mcpServers": {
     "uefn": {
       "command": "python",
-      "args": ["/path/to/uefn-mcp-server/mcp_server.py"]
+      "args": ["${UEFN_MCP_PATH}/mcp_server.py"]
+    },
+    "unreal-mcp": {
+      "type": "http",
+      "url": "http://127.0.0.1:8000/mcp"
     }
   }
 }
 ```
+
+`unreal-mcp` is Epic's official server (UEFN with Toolsets enabled). Project-scope servers need a one-time approval
+in Claude Code (`/mcp`).
+
+### Option B: User-level registration
+
+Works in every project and needs no approval:
+
+```powershell
+claude mcp add uefn -s user -- python "$env:UEFN_MCP_PATH\mcp_server.py"
+```
+
+If `python` resolves to the Microsoft Store alias, pass the full path of a real `python.exe` instead.
 
 ### Custom port
 
@@ -107,35 +139,37 @@ If the default port 8765 is in use, you can specify a different port:
   "mcpServers": {
     "uefn": {
       "command": "python",
-      "args": ["/path/to/uefn-mcp-server/mcp_server.py", "--port", "8766"]
+      "args": ["${UEFN_MCP_PATH}/mcp_server.py", "--port", "8766"]
     }
   }
 }
 ```
 
-Or via environment variable:
+Or via environment variable (first port of the 8765-8770 scan):
 
 ```json
 {
   "mcpServers": {
     "uefn": {
       "command": "python",
-      "args": ["/path/to/uefn-mcp-server/mcp_server.py"],
+      "args": ["${UEFN_MCP_PATH}/mcp_server.py"],
       "env": { "UEFN_MCP_PORT": "8766" }
     }
   }
 }
 ```
 
-## Step 5: Restart Claude Code
+## Step 6: Restart Claude Code
 
-Claude Code reads `.mcp.json` on startup. Start a new session:
+Claude Code reads MCP servers on startup. Start a new session:
 
 ```bash
 claude
+claude mcp list    # expect: uefn ... Connected
 ```
 
-The UEFN MCP tools should now be available. Test with: "ping the UEFN editor".
+The UEFN MCP tools should now be available. Test with: "ping the UEFN editor". `verse_compile` and `verse_status`
+work as soon as UEFN has the project open, even before the listener runs.
 
 ## Listener Management
 

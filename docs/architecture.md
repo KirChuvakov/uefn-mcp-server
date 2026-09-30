@@ -17,7 +17,7 @@ The system consists of two independently running Python processes connected by H
 ### Why two processes?
 
 1. **Thread safety**: All `unreal.*` API calls must happen on the UEFN editor's main thread. A background HTTP server receives commands, but execution is deferred to the main thread via tick callbacks.
-2. **Python version split**: The MCP SDK requires Python 3.10+ with async support. UEFN embeds its own Python interpreter (3.11.8) which has no `pip` and runs inside the editor process.
+2. **Python version split**: The MCP SDK requires Python 3.10+ with async support. UEFN embeds its own Python interpreter (3.11.8) inside the editor process; extra packages can only be vendored next to the code (`vendor/`, used for the optional tray icon).
 3. **Decoupling**: The MCP server can restart independently without affecting the running editor. The listener can restart without breaking the MCP server connection permanently.
 
 ## Component 1: UEFN Listener
@@ -111,7 +111,7 @@ def _cmd_my_command(param1: str, param2: int = 0) -> dict:
 │  │          FastMCP Framework           │  │
 │  │                                      │  │
 │  │  @mcp.tool() decorated functions     │  │
-│  │  22 tools matching listener commands │  │
+│  │  99 tools matching listener commands │  │
 │  └───────────────┬──────────────────────┘  │
 │                  │                          │
 │  ┌───────────────▼──────────────────────┐  │
@@ -177,6 +177,45 @@ Each MCP tool is a thin wrapper:
   "traceback": "Traceback (most recent call last):\n..."
 }
 ```
+
+## Component 3: Verse channels (0.4.0)
+
+Eight tools bypass the listener and work whenever UEFN has the project open, even if Python is off:
+
+- **`verse_workflow.py`** (`verse_compile`, `verse_status`, `verse_push`) connects to the VerseWorkflowServer that the
+  editor exposes on TCP `127.0.0.1:1962` — the channel the `epicgames.verse` VS Code extension uses for "Build Verse
+  Code" and "Push Verse Changes". Messages use LSP-style `Content-Length` framing: requests
+  `{"seq","type":1,"command","params"}`, responses `type:2`, notifications `type:0` (`logMessage` with severity
+  1-4, `updateBuildState` 0-4, `canPushVerseChanges`). `verse_status` only listens to the state the server pushes on
+  connect, so it never starts a build.
+- **`verse_lsp_service.py`** (`verse_symbols`, `verse_hover`, `verse_definition`, `verse_find_symbol`,
+  `verse_lsp_restart`) keeps one `verse-lsp.exe` alive over stdio, initialized with the multi-root `.code-workspace`
+  UEFN generates (project Content plus the Verse / Fortnite / UnrealEngine digests). Navigation only: compile errors
+  come from `verse_compile`.
+
+## Component 4: desktop control and UEFN session (0.5.0)
+
+Two more modules run inside the MCP server process and need neither UEFN nor the listener (Windows only, `ctypes`):
+
+- **`desktop_control.py`** (11 `desktop_*` tools). At import it makes the process per-monitor DPI aware (V2), so every
+  coordinate is a physical pixel of the virtual desktop. Windows come from `EnumWindows` (DWM frame bounds, cloaking,
+  owner, process image), monitors from `EnumDisplayMonitors` (same order as `mss`), captures from GDI `BitBlt` /
+  `StretchBlt(HALFTONE)` written as PNG with `zlib`, input from `SendInput` (absolute moves aimed at pixel centers,
+  Unicode typing, virtual keys with scan codes). Acting calls pass the safety rails first (allowlist, focus and
+  foreground re-check, kill switch, UIPI) and write one JSON line to the audit log.
+- **`uefn_session.py`** (3 `uefn_*` tools). Reads the editor log incrementally (markers such as `Opening project` /
+  `Successfully opened project` / `[MCP] Auto-started`), UEFN's `EditorPerProjectUserSettings.ini` (Load on Startup,
+  last project, per-project Python switch), the Epic launcher manifests (editor exe, launch URI) and probes the ports;
+  `uefn_launch_project` combines them with the desktop tools (HUB screenshot). Also a CLI for `setup.ps1`.
+
+Details: [desktop_control.md](desktop_control.md).
+
+## Autostart (0.4.0)
+
+UEFN runs `init_unreal.py` only from a whitelist of engine plugin folders. `ensure_mcp_hook.ps1` appends a marked
+block to Epic's `EditorToolset/Content/Python/init_unreal.py` that runs this repo's `init_unreal.py` with `runpy`; that
+file puts the repo on `sys.path` and imports `uefn_listener`, whose bootstrap block starts the listener. Fortnite
+updates overwrite the Epic file, so the script is idempotent and meant to run again after updates (hourly task).
 
 ## Adding New Commands
 

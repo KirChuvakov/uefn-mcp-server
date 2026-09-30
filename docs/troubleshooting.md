@@ -12,45 +12,98 @@
 3. Check the Output Log (Window > Output Log) for `[MCP] Listener started on http://127.0.0.1:8765`
 4. Verify with curl: `curl http://127.0.0.1:8765/`
 
+`verse_compile`, `verse_status`, `verse_push` and the Verse navigation tools do not need the listener; they keep
+working while it is down.
+
+### No `[MCP] Auto-started` after a project opens
+
+**Cause:** one of the two autostart gates is closed.
+
+- **The hook is gone.** Fortnite updates overwrite Epic's `EditorToolset` `init_unreal.py`. Run
+  `ensure_mcp_hook.ps1` (or wait for the hourly scheduled task) and reopen the project. The hook only runs at project
+  open; in an already open project start the listener by hand.
+- **Python is off for this project.** The log has no `Python enabled via IPythonScriptPlugin::ForceEnablePythonAtRuntime`
+  after the project opens. Enable **Python Editor Script Plugin** in Project Settings for this project (UEFN stores it per
+  project and per user as `EnablePythonLocallyPerProject`). Remotely: the official `unreal-mcp` tool
+  `ValkyriePythonToolset.EnablePythonInUEFN` turns it on and `IsPythonEnabledInUEFN` checks it. Do not edit
+  `EditorPerProjectUserSettings.ini` while UEFN runs; the editor rewrites it on exit.
+- A `Python disabled via CVar` line on the UEFN hub screen (before any project opens) is normal.
+
+### Listener logged "started", but every connection is refused (after switching projects)
+
+**Cause:** before 0.4.0, closing a project destroyed the Python interpreter but leaked the listener's socket, which kept
+port 8765 bound and reset every connection until the editor exited; the next listener bound over it. Signature:
+`netstat -ano | findstr :8765` shows `LISTENING` owned by the UEFN process, yet connections are refused.
+
+**Fix:** 0.4.0 releases the socket on Python shutdown, never reuses a bound port (the next listener takes 8766; the
+server scans 8765-8770) and rebinds from a 30 s watchdog. With an older listener, restart the editor.
+
 ### "Connection refused" after listener was running
 
 **Cause:** The listener crashed or the editor was restarted.
 
-**Fix:** Re-run the listener via **Tools > Execute Python Script**. If you want auto-start, set up `init_unreal.py` (see [Setup Guide](setup.md)).
+**Fix:** Re-run the listener via **Tools > Execute Python Script**. For auto-start, install the hook
+(`ensure_mcp_hook.ps1`, see [Setup Guide](setup.md)).
 
 ### Port conflict
 
 **Cause:** Port 8765 is already in use by another process.
 
-**Fix:** The listener auto-detects free ports in range 8765-8770. Check which port it bound to in the Output Log. Then configure the MCP server to use the same port:
-
-```bash
-python mcp_server.py --port 8766
-```
-
-Or update `.mcp.json` accordingly.
+**Fix:** The listener takes the first free port in 8765-8770 and the MCP server scans the same range, so nothing needs
+configuring. To pin a port, pass `--port N` to `mcp_server.py` (or set `UEFN_MCP_PORT` to the first port to scan).
 
 To find what's using the port:
 ```bash
 netstat -ano | findstr :8765
 ```
 
+### The MCP bridge died, but the listener is alive
+
+**Fix:** talk to the listener directly — `POST http://127.0.0.1:<port>` with
+`{"command": "<tool name>", "params": {...}}` (the same commands the MCP tools send; `execute_python` takes
+`{"code": "..."}`). A `504` means the command is still running in the editor. Smoke-test the bridge itself with
+`python tests/test_mcp_server_offline.py`, then reconnect the server in Claude Code (`/mcp`).
+
 ## Command Errors
 
 ### "Command timed out after 30s"
 
-**Cause:** The command took too long to execute on the main thread, or the editor is frozen/busy.
+**Cause:** The command took too long to execute on the main thread, or the editor is frozen/busy. The command is
+**not cancelled**: it keeps running inside UEFN, and the listener answers again when it finishes.
 
 **Possible reasons:**
 - Editor is compiling shaders
 - Editor is loading a large level
 - The Python code in `execute_python` has an infinite loop
-- A very large operation (e.g., listing millions of assets)
+- A very large operation (e.g., saving thousands of packages, building Nanite for dozens of meshes)
+- A hidden modal dialog (see below)
 
 **Fix:**
-- Wait for the editor to finish its current operation
-- For long operations, break them into smaller batches
+- Do not re-run the call blindly: poll `ping` until it answers, then check what was already applied
+- Split bulk work into calls that finish in under ~25 s (e.g. at most ~400 package saves or ~10 Nanite builds per call)
+- For a script that may stop halfway, write a marker (file or log line) at its end and check the marker
 - Check the UEFN Output Log for errors
+
+### `verse_compile` returns `ok: false` with no build activity
+
+**Cause:** a modal dialog is open inside UEFN (for example "Overwrite Existing Object" after `create_asset` on an
+existing path). Python keeps ticking, so `ping` still answers, but builds wait. The dialog can sit behind other windows.
+
+**Fix:** find the second top-level window of the UEFN process and close it with a real click; avoid `create_asset` on
+paths that may exist.
+
+### "VerseWorkflowServer not reachable on 127.0.0.1:1962"
+
+**Cause:** UEFN is not running or has no project open. The workflow socket belongs to the open project.
+
+**Fix:** open the project; `verse_status` confirms the connection without compiling.
+
+### Asset import or viewport screenshot hangs
+
+**Cause:** UEFN defers some work while its window is in the background.
+
+**Fix:** bring the UEFN window to the foreground; queued commands then finish. Check the result (`does_asset_exist`,
+the screenshot file) rather than re-running.
 
 ### "Unknown command: xyz"
 
@@ -66,7 +119,14 @@ netstat -ano | findstr :8765
 - Use `get_all_actors` to list actors and find the correct path/label
 - Use `list_assets` to browse the content directory
 - Actor labels are case-sensitive
-- Asset paths must start with `/Game/` (or `/Engine/` for engine assets)
+- Asset paths start with the project's mount point (in UEFN usually `/<ProjectOrPlugin>/`, not `/Game/`) or `/Engine/`
+
+### `device_set_editable`: "Failed to find property"
+
+**Cause:** Verse-declared `@editable` fields live on the device's inner object under a mangled name
+(`__verse_0x<HASH>_<Field>`), not on the actor.
+
+**Fix:** use `execute_python` on the inner object, or read the fields with the official `unreal-mcp` DeviceToolset.
 
 ## Python Execution Issues
 
@@ -88,9 +148,14 @@ result = 1 + 1
 **Cause:** The Python code raised an exception.
 
 **Fix:** Check the `stderr` field for the full traceback. Common issues:
-- `AttributeError`: The API method doesn't exist in UEFN (check `docs/uefn_api_availability.md`)
+- `AttributeError`: The API method doesn't exist in UEFN (check `docs/uefn_python_capabilities.md`)
 - `TypeError`: Wrong argument types (use `unreal.Vector`, `unreal.Rotator`, etc.)
 - `RuntimeError`: Editor state doesn't allow the operation (e.g., saving during PIE)
+
+### Calls that crash the editor
+
+Never call `tk.Tk()` (use `get_tk_root()` + `tk.Toplevel`), never open asset editors from Python
+(`open_editor_for_assets`), and never run the console command `EDIT COPY` with a `None` world context.
 
 ### `print()` output not visible
 
@@ -105,14 +170,24 @@ unreal.log("My message")
 
 ### Claude Code doesn't show UEFN tools
 
-**Cause:** `.mcp.json` not found or MCP server failed to start.
+**Cause:** `.mcp.json` not found, the server is waiting for approval, or it failed to start.
 
 **Fix:**
-1. Verify `.mcp.json` exists in the project root
-2. Check the path to `mcp_server.py` is correct and absolute
-3. Verify `mcp` SDK is installed: `pip install mcp`
-4. Test the server manually: `python mcp_server.py` (should hang waiting for stdio)
-5. Restart Claude Code
+1. `claude mcp list` — is `uefn` listed, and is it `Connected`, failed or pending approval?
+2. Pending approval never goes away: approve it in `/mcp`, or register the server at user scope
+   (`claude mcp add uefn -s user -- python "$env:UEFN_MCP_PATH\mcp_server.py"`)
+3. Check that `UEFN_MCP_PATH` is set for the process that starts Claude Code (restart the terminal or IDE after setting it)
+4. Verify `mcp` SDK is installed: `pip install -r requirements.txt`
+5. Test the server manually: `python tests/test_mcp_server_offline.py`
+6. Restart Claude Code
+
+### Windows: `python` opens the Microsoft Store or does nothing
+
+**Cause:** `python` resolves to the App execution alias in `%LOCALAPPDATA%\Microsoft\WindowsApps`, which Claude Code
+cannot start.
+
+**Fix:** turn off the `python.exe` / `python3.exe` App execution aliases (Windows Settings > Apps > Advanced app
+settings), make sure a real Python is on `PATH`, or put the full path of a real `python.exe` into `command`.
 
 ### "ModuleNotFoundError: No module named 'mcp'"
 
@@ -120,13 +195,19 @@ unreal.log("My message")
 
 **Fix:**
 ```bash
-pip install mcp
+pip install -r requirements.txt
 ```
 
 Make sure you're installing for the same Python that `.mcp.json` references. If you have multiple Python versions:
 ```bash
 python3 -m pip install mcp
 ```
+
+### Verse navigation returns nothing or stale results
+
+**Fix:** run `verse_lsp_restart` after a compile regenerated the digests or after switching projects. The LSP picks
+the most recently modified `.code-workspace` of UEFN; set `VERSE_WORKSPACE_FILE` to pin a project. It needs the
+`epicgames.verse` VS Code extension (or `VERSE_LSP_EXE`). The LSP reports no compile errors — use `verse_compile`.
 
 ## Editor Issues
 
@@ -146,8 +227,51 @@ with unreal.ScopedSlowTask(100, 'Processing...') as task:
 
 ### Listener survives editor restart?
 
-**No.** The listener runs inside the editor process. When the editor closes, the listener dies. You need to restart it (or use `init_unreal.py` for auto-start).
+**No.** The listener runs inside the editor process. When the editor closes, the listener dies. It starts again at the
+next project open when the autostart hook is installed; otherwise start it by hand.
 
 ### Multiple editor instances
 
 Each editor instance needs its own listener on a different port. The auto-detect range (8765-8770) supports up to 6 simultaneous instances. Configure each MCP server connection with the correct port.
+
+## Desktop control (desktop_* / uefn_* tools)
+
+### "kill switch: the mouse cursor is at ..."
+
+The cursor sits within 5 px of a monitor's top-left corner: every acting desktop call is refused on purpose (the owner's
+emergency stop). Move the mouse away when input is wanted again.
+
+### "... is not in the desktop allowlist" / "the foreground switched to ..."
+
+Input goes only to allowlisted processes (UEFN, its crash reporter, the Epic launcher, Fortnite), and only while one of
+them is in the foreground. Another app took the foreground (a notification, the owner clicking): retry after checking
+`desktop_list_windows`. To allow another app, set `UEFN_DESKTOP_ALLOW=+<process>` in the `env` of the `uefn` server.
+
+### "could not bring ... to the foreground"
+
+Windows' focus-stealing protection won against every workaround (the ALT tap included), which happens while another
+app holds input (for example a fullscreen game). Click the target once by hand, or retry when the machine is idle.
+
+### Clicks do nothing / land elsewhere
+
+- The target runs elevated: refused (UIPI would drop the input silently). Run both at the same privilege level.
+- A secure desktop (UAC prompt, lock screen) is active: SendInput and captures fail until it closes.
+- Coordinates: pass `shot=<png path>` when the numbers come from a screenshot; screen coordinates are physical pixels
+  (negative on monitors left of the primary).
+
+### Screenshot is black or shows another window
+
+Captures read the screen: a minimized window cannot be captured (`desktop_focus_window` first), a covered window shows
+what covers it (`occluded_by` in the result), and exclusive-fullscreen games can capture black (use windowed or
+borderless mode).
+
+### `uefn_launch_project` returns "hub"
+
+UEFN's "Load on Startup" is "Home Panel": pick the project's tile from the returned screenshot, click Launch, then call
+`uefn_launch_project(project=..., launch=False)`. Opt-in alternative (owner's decision, UEFN closed):
+`uefn_set_load_on_startup("LastProject")` or `setup.ps1 -EnableLoadLastProject`.
+
+### `uefn_status` says the listener is "busy"
+
+The listener port accepts connections but did not answer within 2 s: a long command is running in the editor (often
+another agent's). Wait and re-check before restarting anything.
