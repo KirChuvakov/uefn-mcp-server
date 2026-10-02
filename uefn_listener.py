@@ -33,7 +33,7 @@ import unreal
 
 # 0.3.3: rotations take named axes; static-mesh tools use crash-safe reads only (0.5.0 safety fixes).
 PROTOCOL_VERSION = "0.3.3"
-VERSION_SUFFIX = ""
+VERSION_SUFFIX = "by Romasno"
 
 try:
     _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
