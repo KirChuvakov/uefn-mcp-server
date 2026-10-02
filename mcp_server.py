@@ -32,6 +32,8 @@ from typing import Annotated, Any, Optional, Union
 from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel, ConfigDict, Field
 
+from tool_tags import experimental
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
@@ -262,7 +264,7 @@ def _device_value_may_be_rotator(value_type: str, value: Any) -> bool:
 mcp = FastMCP(
     "uefn-mcp",
     instructions=(
-        "MCP server for controlling UEFN (Unreal Editor for Fortnite). v0.5.0 (unreleased).\n\n"
+        "MCP server for controlling UEFN (Unreal Editor for Fortnite). v0.5.0.\n\n"
         "Capabilities: actors, assets, levels, viewport, materials, Niagara, "
         "animations, static meshes, data tables, asset validation, device @editables, "
         "Play-In-Editor control (playtest_start/stop/status), StaticMeshActor scatter "
@@ -280,22 +282,15 @@ mcp = FastMCP(
         "Verse navigation (persistent verse-lsp.exe): verse_symbols, verse_hover, "
         "verse_definition, verse_find_symbol, verse_lsp_restart. The LSP gives "
         "navigation only — compile errors come from verse_compile.\n\n"
-        "Desktop control (Windows, no listener needed): desktop_list_windows, "
-        "desktop_screenshot, desktop_focus_window, desktop_click, desktop_move, "
-        "desktop_drag, desktop_scroll, desktop_type, desktop_key, desktop_close_window, "
-        "desktop_wait_for_window — for UI that editor Python cannot reach (crash "
-        "dialog, HUB project tiles, Launch Session / Push hotkeys, modal dialogs) and "
-        "screenshots of the Fortnite client. Input goes only to allowlisted processes "
-        "(UEFN, its crash reporter, the Epic launcher; UEFN_DESKTOP_ALLOW), never to the "
-        "anti-cheat-protected Fortnite game client unless the owner opted in (synthetic "
-        "input there risks the account), after focusing "
-        "and re-checking the foreground; a mouse parked in a monitor's top-left corner "
-        "stops all input; every action is logged. Screenshots return a pixel mapping: "
-        "pass shot=<path> to desktop_click to use image coordinates. Prefer "
-        "mcp__computer-use__* tools when the session has them; one driver at a time.\n\n"
-        "UEFN session (no listener needed): uefn_status (state from the editor log and "
-        "ports), uefn_launch_project (start UEFN, open a project, HUB-aware, wait for "
-        "the listener), uefn_set_load_on_startup (owner opt-in only).\n\n"
+        "UEFN session (Windows, no listener needed): uefn_status (read-only state from "
+        "the editor log, processes and ports), uefn_launch_project (start UEFN, open a "
+        "project, wait for the listener), uefn_set_load_on_startup. These tools send no "
+        "mouse or keyboard input: if UEFN stops on the HUB screen, the user opens the "
+        "project. Set Editor Preferences > Loading & Saving > Load on Startup to 'Most "
+        "Recent Project' so a relaunch after a crash reopens the project by itself.\n\n"
+        "Tools titled [experimental] (execute_python, delete_asset, asset_batch_rename, "
+        "shutdown, verse_push, uefn_launch_project, uefn_set_load_on_startup) are hard to "
+        "undo or act outside the open level: ask the user to confirm before each call.\n\n"
         "The 'execute_python' tool is the most powerful — it runs arbitrary Python "
         "code inside the editor with full access to the `unreal` module. Use "
         "structured tools for common operations and execute_python for everything "
@@ -317,9 +312,9 @@ def ping() -> str:
     return json.dumps(result, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(**experimental("Execute Python in UEFN"))
 def execute_python(code: str) -> str:
-    """Execute arbitrary Python code inside the UEFN editor.
+    """[experimental] Ask the user to confirm before each call. Execute arbitrary Python code inside the UEFN editor.
 
     The code runs on the main editor thread with full access to the `unreal` module.
     Pre-populated variables: unreal, actor_sub, asset_sub, level_sub, tk, get_tk_root.
@@ -374,9 +369,9 @@ def get_log(last_n: int = 50) -> str:
     return "\n".join(result.get("lines", []))
 
 
-@mcp.tool()
+@mcp.tool(**experimental("Stop UEFN listener"))
 def shutdown() -> str:
-    """Gracefully stop the UEFN listener, freeing the port.
+    """[experimental] Ask the user to confirm before each call. Gracefully stop the UEFN listener, freeing the port.
 
     The listener will finish the current request, then shut down.
     After this call the listener must be restarted from the UEFN console.
@@ -596,9 +591,9 @@ def rename_asset(old_path: str, new_path: str) -> str:
     return json.dumps(result, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(**experimental("Delete asset"))
 def delete_asset(asset_path: str) -> str:
-    """Delete an asset.
+    """[experimental] Ask the user to confirm before each call. Delete an asset.
 
     Args:
         asset_path: Asset path to delete.
@@ -1392,9 +1387,9 @@ def staticmesh_generate_uv(
 # -- Asset Pipeline tools ---------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(**experimental("Batch rename assets"))
 def asset_batch_rename(renames: list[dict]) -> str:
-    """Rename (and/or move) multiple assets in one transaction.
+    """[experimental] Ask the user to confirm before each call. Rename (and/or move) multiple assets in one transaction.
 
     Args:
         renames: List of {"old_path": "...", "new_path": "/Package/Path/NewName"}.
@@ -1908,16 +1903,13 @@ verse_lsp_service.register(mcp)
 
 
 # ---------------------------------------------------------------------------
-# Desktop control & UEFN session (host side, Windows)
+# UEFN session (host side, Windows)
 # ---------------------------------------------------------------------------
-# These run in this process (pure ctypes): window listing, GDI screenshots and
-# SendInput input with safety rails, plus UEFN launch / HUB / readiness helpers.
-# Importing desktop_control makes this process per-monitor DPI aware (V2).
+# These run in this process: read-only process / window / log / port checks
+# (win_procs.py, pure ctypes) plus UEFN launch and readiness helpers. No input.
 
-import desktop_control
 import uefn_session
 
-desktop_control.register(mcp)
 uefn_session.register(mcp)
 
 

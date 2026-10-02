@@ -21,7 +21,8 @@ Facts this module relies on (verified 2026-09-30, UEFN 42.20):
   next to LastProjectFileName and EnablePythonLocallyPerProject=((<projectId>, True), ...). UEFN
   rewrites that file on exit, so it is only edited while UEFN is closed.
 * UEFN's Slate UI exposes no UI Automation tree (the window is a bare UnrealWindow with 0
-  children): picking a HUB tile needs a screenshot and a click.
+  children), and these tools send no input: on the HUB screen the user opens the project. Setting
+  'Load on Startup' to Most Recent Project makes a relaunch skip the HUB.
 * The Epic launcher starts UEFN as app "Fortnite_Studio" (launcher manifest *.item); the launcher URI
   com.epicgames.launcher://apps/<ns>%3A<item>%3A<app>?action=launch&silent=true passes the sign-in
   arguments. Starting the editor exe directly also works when UEFN has a cached sign-in.
@@ -46,7 +47,8 @@ import time
 import urllib.request
 from typing import Any, Optional
 
-import desktop_control as dc
+import win_procs as wp
+from tool_tags import experimental
 
 EDITOR_PROCESS = "UnrealEditorFortnite-Win64-Shipping"
 EDITOR_EXE = EDITOR_PROCESS + ".exe"
@@ -91,7 +93,7 @@ def settings_file() -> str:
 
 def documents_dir() -> str:
     """The user's Documents folder (Known Folder API, so OneDrive redirection is honoured)."""
-    if dc.IS_WINDOWS:
+    if wp.IS_WINDOWS:
         try:
             import ctypes
             from ctypes import wintypes
@@ -377,7 +379,7 @@ def launcher_uri_from_manifest(item: dict) -> Optional[str]:
 
 
 def _launcher_registered() -> bool:
-    if not dc.IS_WINDOWS:
+    if not wp.IS_WINDOWS:
         return False
     try:
         import winreg
@@ -392,9 +394,9 @@ def find_install(manifests: Optional[list[dict]] = None, installed: Optional[lis
     """Locate the UEFN editor exe and the launcher URI without machine-specific paths."""
     manifests = epic_manifests() if manifests is None else manifests
     installed = launcher_installed() if installed is None else installed
-    if running_exe is None and dc.IS_WINDOWS:
-        procs = dc.list_processes(EDITOR_PROCESS)
-        running_exe = dc.process_image(procs[0]["pid"]) if procs else ""
+    if running_exe is None and wp.IS_WINDOWS:
+        procs = wp.list_processes(EDITOR_PROCESS)
+        running_exe = wp.process_image(procs[0]["pid"]) if procs else ""
     candidates: list[tuple[str, str]] = []
     if os.environ.get("UEFN_EDITOR_EXE"):
         candidates.append(("UEFN_EDITOR_EXE", os.environ["UEFN_EDITOR_EXE"]))
@@ -471,7 +473,7 @@ def read_settings(path: Optional[str] = None) -> dict:
 
 
 def editor_running() -> bool:
-    return bool(dc.IS_WINDOWS and dc.list_processes(EDITOR_PROCESS))
+    return bool(wp.IS_WINDOWS and wp.list_processes(EDITOR_PROCESS))
 
 
 def write_settings(changes: dict[str, str], dry_run: bool = False, path: Optional[str] = None,
@@ -663,15 +665,14 @@ def classify(*, editor_pids: list[int], crash_dialog: bool, log_current: bool, p
 def editor_state(project: Optional[dict] = None, probe_ports: bool = True,
                  hub_grace_sec: float = HUB_GRACE_SEC) -> dict:
     """Snapshot: processes, windows, crash dialog, log markers, ports, settings, hook; state + hints."""
-    dc._require_windows()
-    procs = dc.list_processes(EDITOR_PROCESS)
+    wp.require_windows()
+    procs = wp.list_processes(EDITOR_PROCESS)
     pid = procs[0]["pid"] if procs else None
-    started = dc.process_start_time(pid) if pid else None
-    monitors = dc.list_monitors()
-    crash = dc.find_windows(process=CRASH_PROCESS, monitors=monitors)
-    ed_windows = [w for w in dc.find_windows(process=EDITOR_PROCESS, monitors=monitors) if w["class"] == "UnrealWindow"]
-    main = dc.pick_main_window([w for w in ed_windows if not w["owner"]] or ed_windows)
-    dialogs = [dc.brief(w) for w in ed_windows if main and w["hwnd"] != main["hwnd"]]
+    started = wp.process_start_time(pid) if pid else None
+    crash = wp.find_windows(process=CRASH_PROCESS)
+    ed_windows = [w for w in wp.find_windows(process=EDITOR_PROCESS) if w["class"] == "UnrealWindow"]
+    main = wp.pick_main_window([w for w in ed_windows if not w["owner"]] or ed_windows)
+    dialogs = [wp.brief(w) for w in ed_windows if main and w["hwnd"] != main["hwnd"]]
     scan = scan_log()
     log_current = bool(pid and scan.header_epoch and started and scan.header_epoch >= started - 120)
     ps = scan.project() if log_current else {"state": "none", "path": None, "since": None}
@@ -689,10 +690,10 @@ def editor_state(project: Optional[dict] = None, probe_ports: bool = True,
         "open_project": ps,
         "editor": {"pids": [p["pid"] for p in procs], "started": time.strftime("%Y-%m-%d %H:%M:%S",
                    time.localtime(started)) if started else None,
-                   "main_window": dict(dc.brief(main), rect=main["rect"], minimized=main["minimized"],
-                                       responding=not dc.is_hung(main["hwnd"])) if main else None,
+                   "main_window": dict(wp.brief(main), rect=main["rect"], minimized=main["minimized"],
+                                       responding=not wp.is_hung(main["hwnd"])) if main else None,
                    "other_windows": dialogs},
-        "crash_dialog": [dc.brief(w) for w in crash],
+        "crash_dialog": [wp.brief(w) for w in crash],
         "log": {"path": log_file(), "current_run": log_current,
                 "python_enabled": bool(scan.after("python_on", opening)) if log_current else None,
                 "mcp_autostart": (scan.after("mcp_started", opening) or {}).get("port") if log_current else None,
@@ -718,26 +719,31 @@ def hints_for(st: dict) -> list[str]:
     ports = st.get("ports") or {}
     title = (st.get("project") or {}).get("title") or "the project"
     if s == "crash_dialog":
-        hints.append("The UEFN crash reporter is showing: desktop_close_window(process='CrashReportClientEditor'), "
-                     "then uefn_launch_project.")
+        if st["editor"].get("pids"):
+            hints.append("The UEFN crash reporter is showing while an editor process still runs: wait for the "
+                         "editor to exit, or ask the user to close the crash report window.")
+        else:
+            hints.append("The UEFN crash reporter is left over from a crash: ask the user to close it, or (with "
+                         "their confirmation) call uefn_launch_project(close_crash_reporter=True).")
     elif s == "not_running":
         hints.append("UEFN is not running: uefn_launch_project(project=...) starts it.")
     elif s == "starting":
         hints.append("UEFN is starting (about 30-60 s to the HUB or to the project load); call again.")
     elif s == "hub":
-        hints.append(f"HUB screen: uefn_launch_project returns a screenshot; click the tile of '{title}', then "
-                     "Launch; then call uefn_launch_project(project=..., launch=False) to wait.")
+        hints.append(f"HUB screen: ask the user to open '{title}', then call uefn_launch_project(project=..., "
+                     "launch=False) to wait. To skip the HUB on future launches, set Editor Preferences > Loading "
+                     "& Saving > Load on Startup to 'Most Recent Project'.")
     elif s == "opening":
         hints.append("The project is loading (typically 30-90 s).")
         if st["editor"].get("other_windows"):
-            hints.append("UEFN shows extra windows (dialog?): desktop_screenshot(process='UnrealEditorFortnite') "
-                         "and answer it if the load waits for input.")
+            hints.append("UEFN shows extra windows (a dialog?): if the load waits for an answer, ask the user to "
+                         "answer it.")
     elif s == "open_failed":
         hints.append("The project failed to open: read the editor log (get_editor_log / uefn_logs) around "
                      "'OpenProject_'.")
     elif s == "other_project_open":
-        hints.append("Another project is open. Never kill a healthy editor: switch through File > Open Project "
-                     "(HUB) with desktop tools, or ask the owner.")
+        hints.append("Another project is open. Never kill a healthy editor: ask the user to switch projects "
+                     "(File > Open Project).")
     if s == "project_open" and not ports.get("listener"):
         py_enabled = log.get("python_enabled")
         responding = ((st.get("editor") or {}).get("main_window") or {}).get("responding", True)
@@ -745,7 +751,7 @@ def hints_for(st: dict) -> list[str]:
             hints.append(f"The listener on {ports['listener_busy'][0]} accepts connections but did not answer in "
                          "time: a long command is running in the editor" + ("" if responding else
                          " and the editor window is not responding (hung?)") + ". Wait and re-check before "
-                         "restarting anything; another agent may be driving the editor.")
+                         "restarting anything; another client may be driving the editor.")
         elif py_enabled is False:
             hints.append("Python is off for this project, so the listener cannot start: unreal-mcp "
                          "ValkyriePythonToolset.EnablePythonInUEFN (check IsPythonEnabledInUEFN), or Project "
@@ -758,7 +764,7 @@ def hints_for(st: dict) -> list[str]:
                          "the project, or start it now: Tools > Execute Python Script > uefn_listener.py.")
         elif log.get("mcp_autostart"):
             hints.append(f"The listener autostarted on {log['mcp_autostart']} but does not answer: wait 30 s "
-                         "(watchdog), then see the restart-uefn skill (zombie socket).")
+                         "(watchdog), then see docs/troubleshooting.md (zombie socket).")
         else:
             hints.append("Waiting for Python / the listener (about 20-40 s after the project opens).")
     if s == "project_open" and ports.get("listener"):
@@ -799,17 +805,13 @@ def launch_editor(project_path: Optional[str], via: str = "auto", install: Optio
     raise RuntimeError(f"could not start {exe}")
 
 
-def _hub_capture(focus: bool) -> dict:
-    wins = [w for w in dc.find_windows(process=EDITOR_PROCESS) if w["class"] == "UnrealWindow"]
-    main = dc.pick_main_window([w for w in wins if not w["owner"]] or wins)
-    if not main:
-        raise dc.DesktopError("no UEFN window found")
-    focused = None
-    if focus and (main["minimized"] or dc.occluders(main) or not main.get("foreground")):
-        focused = dc.op_focus(process=EDITOR_PROCESS, class_name="UnrealWindow")
-        time.sleep(0.4)
-    shot = dc.screenshot(process=EDITOR_PROCESS, class_name="UnrealWindow")
-    return {"screenshot": shot, "focused": focused}
+def close_orphan_crash_reporter() -> dict:
+    """Stop the crash reporter left over from a crash, only when no UEFN editor process runs."""
+    if wp.list_processes(EDITOR_PROCESS):
+        raise RuntimeError("a UEFN editor process still runs; the crash reporter is not closed while it does")
+    pids = [p["pid"] for p in wp.list_processes(CRASH_PROCESS)]
+    stopped = [pid for pid in pids if wp.terminate_process(pid)]
+    return {"crash_reporter_pids": pids, "stopped": stopped, "gone": wp.wait_gone(pids)}
 
 
 def _result(status: str, st: Optional[dict], t0: float, **extra: Any) -> dict:
@@ -822,36 +824,35 @@ def _result(status: str, st: Optional[dict], t0: float, **extra: Any) -> dict:
 
 async def launch_project(project: str = "", launch: bool = True, launch_via: str = "auto",
                          retarget_last_project: bool = True, enable_load_last_project: bool = False,
-                         wait_sec: float = 180.0, hub_grace_sec: float = HUB_GRACE_SEC, focus_hub: bool = True,
-                         wait_for_listener: bool = True, listener_wait_sec: float = 90.0) -> dict:
+                         wait_sec: float = 180.0, hub_grace_sec: float = HUB_GRACE_SEC,
+                         wait_for_listener: bool = True, listener_wait_sec: float = 90.0,
+                         close_crash_reporter: bool = False) -> dict:
     """Start UEFN if needed, get the project open (HUB aware) and wait for the listener."""
-    dc._require_windows()
+    wp.require_windows()
     t0 = time.monotonic()
     proj = resolve_project(project)
     actions: list[Any] = []
     st = editor_state(proj, probe_ports=False, hub_grace_sec=hub_grace_sec)
+    if st["state"] == "crash_dialog" and close_crash_reporter and not st["editor"]["pids"]:
+        actions.append({"close_crash_reporter": close_orphan_crash_reporter()})
+        st = editor_state(proj, probe_ports=False, hub_grace_sec=hub_grace_sec)
     if st["state"] == "crash_dialog":
-        return _result("crash_dialog", st, t0, next_steps=st["hints"])
+        return _result("crash_dialog", st, t0, actions=actions, next_steps=st["hints"])
     if st["state"] == "not_running":
         if not launch:
-            return _result("not_running", st, t0, next_steps=st["hints"])
-        with dc._ActionLog("uefn_launch_project") as act:
-            act.fields["project"] = proj["path"]
-            dc.preflight(act)
-            changes: dict[str, str] = {}
-            settings = read_settings()
-            load = (settings.get("load_on_startup") or "").strip()
-            if enable_load_last_project and load != "LastProject":
-                changes[LOAD_KEY] = "LastProject"
-                load = "LastProject"
-            if (retarget_last_project and load == "LastProject"
-                    and _norm(settings.get("last_project") or "") != _norm(proj["path"])):
-                changes[LAST_PROJECT_KEY] = proj["path"].replace("\\", "/")
-            if changes:
-                actions.append({"settings": write_settings(changes)})
-            launched = launch_editor(proj["path"], launch_via)
-            act.fields["launch"] = launched.get("via")
-            actions.append({"launch": launched})
+            return _result("not_running", st, t0, actions=actions, next_steps=st["hints"])
+        changes: dict[str, str] = {}
+        settings = read_settings()
+        load = (settings.get("load_on_startup") or "").strip()
+        if enable_load_last_project and load != "LastProject":
+            changes[LOAD_KEY] = "LastProject"
+            load = "LastProject"
+        if (retarget_last_project and load == "LastProject"
+                and _norm(settings.get("last_project") or "") != _norm(proj["path"])):
+            changes[LAST_PROJECT_KEY] = proj["path"].replace("\\", "/")
+        if changes:
+            actions.append({"settings": write_settings(changes)})
+        actions.append({"launch": launch_editor(proj["path"], launch_via)})
     deadline = t0 + max(10.0, min(wait_sec, 1800.0))
     while True:
         st = editor_state(proj, probe_ports=False, hub_grace_sec=hub_grace_sec)
@@ -861,28 +862,18 @@ async def launch_project(project: str = "", launch: bool = True, launch_via: str
         if s == "project_open":
             break
         if s == "hub":
-            cap = _hub_capture(focus_hub)
-            return _result("hub", st, t0, actions=actions, screenshot=cap["screenshot"], focused=cap["focused"],
-                           next_steps=[
-                               f"Read {cap['screenshot']['path']} and find the tile titled '{proj['title']}' "
-                               "(Recent Projects / My Projects). No UI Automation: UEFN's Slate UI exposes none.",
-                               f"desktop_click(x, y, shot='{cap['screenshot']['path']}') on the tile; take a new "
-                               "desktop_screenshot(process='UnrealEditorFortnite') and click the Launch button (or "
-                               "double-click the tile). Do not change the 'Load on Startup' selector unless the owner "
-                               "asked.",
-                               f"Then call uefn_launch_project(project='{proj['path']}', launch=False) to wait for "
-                               "the project and the listener."])
+            return _result("hub", st, t0, actions=actions, next_steps=[
+                f"UEFN shows the HUB (project browser). These tools send no input: ask the user to open "
+                f"'{proj['title']}', then call uefn_launch_project(project='{proj['path']}', launch=False) to wait "
+                "for the project and the listener.",
+                "To skip the HUB on future launches: Editor Preferences > Loading & Saving > Load on Startup = "
+                "'Most Recent Project' (or, with UEFN closed, uefn_set_load_on_startup('LastProject'))."])
         if time.monotonic() >= deadline:
             extra: dict[str, Any] = {"actions": actions, "next_steps": st["hints"] + [
                 "Timed out; call uefn_launch_project again (with launch=False) to keep waiting."]}
             if s == "not_running" and actions:
                 extra["next_steps"].append("Nothing started: check the Epic Games Launcher (sign-in, update) or "
                                            "retry with launch_via='exe'.")
-            if st["editor"].get("main_window") and not st["editor"]["main_window"]["minimized"]:
-                try:
-                    extra["screenshot"] = dc.screenshot(process=EDITOR_PROCESS, class_name="UnrealWindow")
-                except Exception:
-                    pass
             return _result("timeout", st, t0, **extra)
         await asyncio.sleep(2.0)
     port = None
@@ -953,13 +944,14 @@ def register(mcp) -> None:
         """
         return _dump(status_report(project, probe_ports))
 
-    @mcp.tool()
+    @mcp.tool(**experimental("Launch UEFN project"))
     async def uefn_launch_project(project: str = "", launch: bool = True, launch_via: str = "auto",
                                   retarget_last_project: bool = True, enable_load_last_project: bool = False,
                                   wait_sec: float = 180.0, hub_grace_sec: float = HUB_GRACE_SEC,
-                                  focus_hub: bool = True, wait_for_listener: bool = True,
-                                  listener_wait_sec: float = 90.0) -> str:
-        """Open a UEFN project end to end and wait until it is usable.
+                                  wait_for_listener: bool = True, listener_wait_sec: float = 90.0,
+                                  close_crash_reporter: bool = False) -> str:
+        """[experimental] Ask the user to confirm before each call. Open a UEFN project end to end and
+        wait until it is usable. Sends no mouse or keyboard input.
 
         1. Resolves `project` (.uefnproject path, folder or name; default UEFN_PROJECT or the last one).
         2. If UEFN is not running and `launch`: starts it through the Epic launcher URI (sign-in args) or
@@ -967,27 +959,27 @@ def register(mcp) -> None:
            Recent Project, `retarget_last_project` points LastProjectFileName at this project first (UEFN
            closed only). `enable_load_last_project=true` also switches 'Load on Startup' to Most Recent
            Project: an explicit opt-in, never done otherwise.
-        3. Waits for the project load (editor log) or the HUB screen. On the HUB it returns
-           status='hub' with a screenshot of the UEFN window and its mapping: click the project's tile
-           and Launch with desktop_click(shot=...), then call again with launch=False.
+        3. Waits for the project load (editor log). If UEFN stops on the HUB screen (Load on Startup =
+           Home Panel), it returns status='hub': the user opens the project, then call again with
+           launch=False. With Load on Startup = Most Recent Project, UEFN opens the project by itself.
         4. Waits for the listener (8765-8770) and reports ready, or why not (Python off, hook missing).
-        Other results: crash_dialog, other_project_open, open_failed, timeout (call again). Never
-        closes or kills an editor. Acting parts obey the desktop safety rails (kill switch, audit log).
+        Other results: crash_dialog, other_project_open, open_failed, timeout (call again). Never closes
+        or kills an editor. `close_crash_reporter=true` stops a crash reporter left over from a crash
+        (only when no editor process runs) before launching.
         """
         return _dump(await launch_project(project, launch, launch_via, retarget_last_project,
-                                          enable_load_last_project, wait_sec, hub_grace_sec, focus_hub,
-                                          wait_for_listener, listener_wait_sec))
+                                          enable_load_last_project, wait_sec, hub_grace_sec,
+                                          wait_for_listener, listener_wait_sec, close_crash_reporter))
 
-    @mcp.tool()
+    @mcp.tool(**experimental("Set UEFN Load on Startup"))
     def uefn_set_load_on_startup(value: str, dry_run: bool = False) -> str:
-        """Set UEFN's 'Load on Startup' preference: HomeScreen (the HUB / Home Panel) or LastProject (Most
-        Recent Project, so a relaunch reopens the project by itself). Only on the owner's explicit
-        request. UEFN must be closed (it rewrites the file on exit); edits
+        """[experimental] Ask the user to confirm before each call. Set UEFN's 'Load on Startup'
+        preference: HomeScreen (the HUB / Home Panel) or LastProject (Most Recent Project, so a relaunch
+        reopens the project by itself). UEFN must be closed (it rewrites the file on exit); edits
         EditorPerProjectUserSettings.ini ([/Script/ValkyrieEditor.ValkyrieEditorConfig]
-        ValkyrieLoadAtStartupMostRecentProject) with a backup. dry_run shows the change only."""
-        with dc._ActionLog("uefn_set_load_on_startup") as act:
-            act.fields["value"] = value
-            return _dump(set_load_on_startup(value, dry_run))
+        ValkyrieLoadAtStartupMostRecentProject) with a backup. dry_run shows the change only. The same
+        setting is in the editor: Editor Preferences > Loading & Saving > Load on Startup."""
+        return _dump(set_load_on_startup(value, dry_run))
 
 
 # ---------------------------------------------------------------------------

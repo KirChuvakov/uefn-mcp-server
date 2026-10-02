@@ -47,13 +47,13 @@ LogWindows: Custom abort handler registered for crash reporting.
 [2026.09.30-16.35.43:985][848]LogInit: Display: Engine is initialized. Leaving FEngineLoop::Init()
 [2026.09.30-16.35.44:555][848]LogValkyrie: Searching for projects under the following folder(s) took 0.35 sec
 [2026.09.30-16.35.45:671][848]LogValkyrieProjectBrowser: Selected Project (Direct): {
-[2026.09.30-16.35.53:965][849]LogValkyrie: Opening project 'C:/Projects/NewSkyFort/NewSkyFort.uefnproject'
+[2026.09.30-16.35.53:965][849]LogValkyrie: Opening project 'C:/Projects/MyIsland/MyIsland.uefnproject'
 [2026.09.30-16.36.20:195][982]LogPython: Warning: Python enabled via IPythonScriptPlugin::ForceEnablePythonAtRuntime:
 [2026.09.30-16.36.28:615][982]LogPython: [MCP] Listener started on http://127.0.0.1:8765
 [2026.09.30-16.36.28:710][982]LogPython: [MCP] Auto-started on port 8765
 [2026.09.30-16.36.28:783][982]LogValkyrieToolsetRegistration: Started the ModelContextProtocol server on port 8000 for the UEFN MCP Toolsets setting.
 [2026.09.30-16.36.29:151][982]LogValkyrie: OpenProject_End - Begin (bSuccess=1, bCanceled=0)
-[2026.09.30-16.36.29:151][982]LogValkyrie: Display: Successfully opened project 'C:/Projects/NewSkyFort/NewSkyFort.uefnproject' and 0 dependency project(s) (took 35.12 sec)
+[2026.09.30-16.36.29:151][982]LogValkyrie: Display: Successfully opened project 'C:/Projects/MyIsland/MyIsland.uefnproject' and 0 dependency project(s) (took 35.12 sec)
 """
 
 
@@ -111,7 +111,7 @@ def test_log_scan_markers():
     scan = us.LogScan().feed_text(LOG)
     assert scan.header_epoch == time.mktime((2026, 9, 30, 19, 35, 18, 0, 0, -1))
     p = scan.project()
-    assert p["state"] == "open" and p["path"].endswith("NewSkyFort.uefnproject")
+    assert p["state"] == "open" and p["path"].endswith("MyIsland.uefnproject")
     opening = scan.event("opening")
     assert scan.after("python_on", opening) and scan.after("mcp_started", opening)["port"] == "8765"
     assert scan.after("toolset_mcp", opening)["port"] == "8000"
@@ -287,7 +287,11 @@ def test_hints():
     assert any("did not answer in time" in h for h in us.hints_for(st))
     st["ports"] = {"listener": 8765}
     assert us.hints_for(st) == ["Ready: listener on 8765."]
-    assert any("desktop_close_window" in h for h in us.hints_for(dict(st, state="crash_dialog")))
+    crash = dict(st, state="crash_dialog", editor={"pids": []})
+    assert any("close_crash_reporter=True" in h for h in us.hints_for(crash))
+    assert not any("close_crash_reporter" in h for h in us.hints_for(dict(crash, editor={"pids": [1]})))
+    hub = us.hints_for(dict(st, state="hub"))
+    assert any("Most Recent Project" in h for h in hub) and not any("click" in h for h in hub)
 
 
 def _run_all():

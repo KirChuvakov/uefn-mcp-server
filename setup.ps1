@@ -7,15 +7,16 @@
   checks first and changes only what is missing; -DryRun reports every step and changes nothing.
 
     1. Finds a real host Python 3.10+ (never the Microsoft Store alias) and pip-installs requirements.txt (the mcp
-       SDK). -WithMss adds mss (only the old screenshot_desktop tool needs it; the desktop_* tools do not).
+       SDK). -WithMss adds mss (only the screenshot_desktop tool needs it).
     2. -WithTray: installs pystray + Pillow into .\vendor with UEFN's embedded Python (listener tray icon).
     3. Sets the user environment variable UEFN_MCP_PATH to this folder.
     4. Runs ensure_mcp_hook.ps1: the listener autostart hook in Epic's EditorToolset init_unreal.py.
        -ScheduleHook also registers the hourly task "UEFN-MCP-hook" that re-adds the hook after Fortnite updates.
     5. Reports the UEFN side: install and Epic launcher entry, "Load on Startup", whether Python is enabled for
        -Project (or the last opened project), the hook.
-    6. -EnableLoadLastProject: explicit opt-in, sets UEFN's "Load on Startup" to Most Recent Project so a relaunch
-       reopens the project by itself (UEFN must be closed). Never changed otherwise.
+    6. -EnableLoadLastProject: sets UEFN's "Load on Startup" to Most Recent Project so a relaunch after a crash
+       reopens the project by itself, without the HUB screen (UEFN must be closed). Recommended for agents; never
+       changed without this switch.
     7. -RegisterClaude: registers the server for Claude Code at user scope (claude mcp add uefn -s user ...).
     8. Prints what is left to do by hand.
 
@@ -237,7 +238,7 @@ if ($EnableLoadLastProject) {
         if ($r.warning) { Info $r.warning }
     }
 } elseif (-not $st.error -and $st.settings.load_on_startup -ne 'LastProject') {
-    $todo.Add('Optional: UEFN starts on the HUB screen here; agents then pick the project from a screenshot (uefn_launch_project). To reopen the last project automatically, close UEFN and run setup.ps1 -EnableLoadLastProject, or set Editor Preferences > Loading & Saving > Load on Startup = Most Recent Project.')
+    $todo.Add('Recommended: UEFN starts on the HUB screen here, so after a crash an agent cannot reopen the project by itself (the MCP tools send no clicks; you would open it by hand). Set Editor Preferences > Loading & Saving > Load on Startup = Most Recent Project, or close UEFN and run setup.ps1 -EnableLoadLastProject.')
 }
 
 # 7. Claude Code registration -----------------------------------------------------------------------------------------
@@ -257,9 +258,8 @@ if ($RegisterClaude) {
 
 # 8. What is left -----------------------------------------------------------------------------------------------------
 Step 'Left for you'
-$todo.Add('Projects created by the hub already have .mcp.json (uefn + unreal-mcp). Elsewhere: see README "Configure Claude Code". In Claude Code run /mcp and approve / reconnect "uefn"; check with the ping tool.')
+$todo.Add('See README "Configure Claude Code" for .mcp.json. In Claude Code run /mcp and approve / reconnect "uefn"; check with the ping tool.')
 $todo.Add('Open your project in UEFN once: the Output Log should show "[MCP] Auto-started on port 8765". Manual fallback: Tools > Execute Python Script > uefn_listener.py from this folder.')
-$todo.Add('Desktop control (desktop_* / uefn_* tools) needs nothing else. Safety: park the mouse in a monitor''s top-left corner to stop any agent input (docs/desktop_control.md).')
 $i = 1
 foreach ($item in $todo) { Info "$i. $item"; $i++ }
 if ($failed) { exit 1 }

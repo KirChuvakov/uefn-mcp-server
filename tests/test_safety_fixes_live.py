@@ -14,7 +14,7 @@ listener are all exercised):
    spawn_actor with the ambiguous list [0, 90, 0] must be refused.
 3. --niagara: niagara_place_actor with {pitch 90}, checked the same way.
 4. --camera (moves the viewport camera, restores it afterwards; the studio rule is never to move the
-   owner's camera, so only with their consent): set_viewport_camera {pitch -45, yaw 90} read back with
+   user's camera, so only with their consent): set_viewport_camera {pitch -45, yaw 90} read back with
    get_viewport_camera, and focus_selected on the test cube must look at it (pitch -35, yaw 45).
 5. staticmesh_get_info on /Engine/BasicShapes/Cube (and --mesh): safe facts present, the crash-list
    values marked "not available safely in UEFN 42.20". The editor must still answer ping afterwards.

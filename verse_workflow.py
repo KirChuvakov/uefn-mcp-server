@@ -20,6 +20,8 @@ import os
 import socket
 import time
 
+from tool_tags import experimental
+
 WORKFLOW_HOST = os.environ.get("VERSE_WORKFLOW_HOST", "127.0.0.1")
 WORKFLOW_PORT = int(os.environ.get("VERSE_WORKFLOW_PORT", "1962"))
 
@@ -198,9 +200,9 @@ def register(mcp) -> None:
         """
         return json.dumps(workflow_status(), indent=2, ensure_ascii=False)
 
-    @mcp.tool()
+    @mcp.tool(**experimental("Push changes to live session"))
     def verse_push(verse_only: bool = True) -> str:
-        """Push changes to the live UEFN session (equivalent of "Push Changes").
+        """[experimental] Ask the user to confirm before each call. Push changes to the live UEFN session (equivalent of "Push Changes").
 
         Only works while a session/playtest is running (the editor must have
         announced canPushVerseChanges=true). verse_only=True pushes only Verse

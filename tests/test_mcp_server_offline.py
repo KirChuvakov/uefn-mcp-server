@@ -3,7 +3,8 @@
 Starts a fresh mcp_server.py over stdio, runs the MCP handshake and
 tools/list, and checks that every tool module registered, that rotation
 parameters are published as named axes (pitch / yaw / roll) and that the
-instructions carry the 0.5.0 safety rules. UEFN_MCP_PORT is set above the
+instructions carry the 0.5.0 safety rules and that
+exactly the [experimental] tools carry the confirmation tag. UEFN_MCP_PORT is set above the
 listener's scan range (8765-8770), so the server's heartbeat never reaches a
 running editor. Needs only the host Python with `pip install -r requirements.txt`.
 
@@ -17,13 +18,8 @@ import sys
 import threading
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-# 107 in 0.4.0 + 11 desktop_* + 3 uefn_* session tools (0.5.0).
-MIN_TOOLS = 121
-DESKTOP_TOOLS = {
-    "desktop_list_windows", "desktop_screenshot", "desktop_focus_window", "desktop_click", "desktop_move",
-    "desktop_drag", "desktop_scroll", "desktop_type", "desktop_key", "desktop_close_window",
-    "desktop_wait_for_window",
-}
+# 107 in 0.4.0 + 3 uefn_* session tools (0.5.0).
+MIN_TOOLS = 110
 SESSION_TOOLS = {"uefn_status", "uefn_launch_project", "uefn_set_load_on_startup"}
 # One tool per group (all of the new groups), so a module that fails to register is caught by name.
 EXPECTED = {
@@ -33,7 +29,11 @@ EXPECTED = {
     "device_set_editable", "playtest_start", "mesh_scatter", "verse_list_services",
     "verse_compile", "verse_status", "verse_push",
     "verse_symbols", "verse_hover", "verse_definition", "verse_find_symbol", "verse_lsp_restart",
-} | DESKTOP_TOOLS | SESSION_TOOLS
+} | SESSION_TOOLS
+# Tools that need the user's confirmation: "[experimental]" title, destructiveHint, note first in the description.
+EXPERIMENTAL_TOOLS = {"execute_python", "delete_asset", "asset_batch_rename", "shutdown", "verse_push",
+                      "uefn_launch_project", "uefn_set_load_on_startup"}
+EXPERIMENTAL_NOTE = "[experimental] Ask the user to confirm before each call."
 # Tools whose rotation parameter must be published as named axes (0.5.0 rotation fix).
 ROTATION_PARAMS = {"spawn_actor": "rotation", "set_actor_transform": "rotation", "set_viewport_camera": "rotation",
                    "niagara_place_actor": "rotation", "staticmesh_generate_uv": "orientation"}
@@ -76,7 +76,8 @@ def _run() -> dict:
                 break
     finally:
         proc.kill()
-    return {"init": init, "tools": [t["name"] for t in tools], "schemas": {t["name"]: t["inputSchema"] for t in tools}}
+    return {"init": init, "tools": [t["name"] for t in tools], "schemas": {t["name"]: t["inputSchema"] for t in tools},
+            "meta": {t["name"]: t for t in tools}}
 
 
 def _check() -> dict:
@@ -84,12 +85,19 @@ def _check() -> dict:
     names = set(out["tools"])
     assert out["init"]["serverInfo"]["name"] == "uefn-mcp"
     instructions = out["init"].get("instructions") or ""
-    assert "v0.5.0" in instructions and "desktop_click" in instructions and "uefn_launch_project" in instructions
-    assert '"pitch"' in instructions and "has_vertex_colors" in instructions and "Fortnite game client" in instructions
+    assert "v0.5.0" in instructions and "uefn_launch_project" in instructions and "Most Recent Project" in instructions
+    assert '"pitch"' in instructions and "has_vertex_colors" in instructions and "[experimental]" in instructions
+    assert "unreleased" not in instructions and "desktop_" not in instructions
     assert len(out["tools"]) == len(names), "duplicate tool names"
     assert len(names) >= MIN_TOOLS, f"{len(names)} tools < {MIN_TOOLS}"
     missing = EXPECTED - names
     assert not missing, f"missing tools: {sorted(missing)}"
+    assert not [n for n in names if n.startswith("desktop_")], "desktop input tools are gone since 0.5.0"
+    for name, tool in out["meta"].items():
+        tagged = name in EXPERIMENTAL_TOOLS
+        assert (tool.get("title") or "").startswith("[experimental]") == tagged, name
+        assert tool["description"].startswith(EXPERIMENTAL_NOTE) == tagged, name
+        assert bool((tool.get("annotations") or {}).get("destructiveHint")) == tagged, name
     for tool, param in ROTATION_PARAMS.items():
         schema = out["schemas"][tool]
         rotation = schema["$defs"]["Rotation"]
@@ -108,5 +116,5 @@ if __name__ == "__main__":
     info = result["init"]["serverInfo"]
     names = set(result["tools"])
     print(f"OK: {info['name']} (mcp SDK {info.get('version')}), {len(result['tools'])} tools "
-          f"({len(names & DESKTOP_TOOLS)} desktop_*, {len(names & SESSION_TOOLS)} uefn_* session), "
+          f"({len(names & SESSION_TOOLS)} uefn_* session, {len(names & EXPERIMENTAL_TOOLS)} [experimental]), "
           f"{len(ROTATION_PARAMS)} rotation parameters with named axes")
