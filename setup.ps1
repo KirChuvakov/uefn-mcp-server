@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  One-step, idempotent setup of the UEFN MCP server on a Windows machine: THE onboarding step for a teammate.
+  One-step, idempotent setup of the UEFN MCP server on a Windows machine.
 
 .DESCRIPTION
   Run it from the clone once per machine, and again after moving the clone or after a Fortnite update. Every step

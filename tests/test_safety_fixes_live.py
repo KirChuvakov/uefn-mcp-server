@@ -1,6 +1,6 @@
 """LIVE check of the 0.5.0 safety fixes against a running UEFN listener. It CHANGES THE OPEN LEVEL.
 
-Not run yet (pending): run it on a scratch level of a scratch project, never on a production island,
+Run it on a scratch level of a scratch project, never on a production island,
 with nobody else driving the editor, after saving everything:
 
     python tests/test_safety_fixes_live.py --yes-touch-editor [--camera] [--niagara /Mount/FX/NS_X] [--mesh /Mount/Meshes/SM_X]
@@ -13,8 +13,8 @@ listener are all exercised):
    must report exactly those axes. set_actor_transform to {pitch -20, yaw 135, roll 5}, same check.
    spawn_actor with the ambiguous list [0, 90, 0] must be refused.
 3. --niagara: niagara_place_actor with {pitch 90}, checked the same way.
-4. --camera (moves the viewport camera, restores it afterwards; the studio rule is never to move the
-   user's camera, so only with their consent): set_viewport_camera {pitch -45, yaw 90} read back with
+4. --camera (moves the viewport camera, restores it afterwards; never move the user's
+   camera without their consent): set_viewport_camera {pitch -45, yaw 90} read back with
    get_viewport_camera, and focus_selected on the test cube must look at it (pitch -35, yaw 45).
 5. staticmesh_get_info on /Engine/BasicShapes/Cube (and --mesh): safe facts present, the crash-list
    values marked "not available safely in UEFN 42.20". The editor must still answer ping afterwards.
