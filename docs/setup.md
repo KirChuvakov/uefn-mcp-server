@@ -7,7 +7,7 @@
 - Claude Code CLI installed
 - Optional: the `epicgames.verse` VS Code extension (for the Verse navigation tools)
 
-## Step 0: `setup.ps1` (the onboarding step)
+## Step 0: `setup.ps1`
 
 From the clone (idempotent; `-DryRun` shows what it would do and changes nothing):
 
@@ -19,8 +19,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\setup.ps1 -ScheduleHook -P
 It finds a real Python 3.10+ (never the Microsoft Store alias), installs `requirements.txt`, sets the user variable
 `UEFN_MCP_PATH`, runs `ensure_mcp_hook.ps1` (listener autostart; `-ScheduleHook` adds the hourly task that re-adds the
 hook after Fortnite updates), reports the UEFN install, "Load on Startup" and whether Python is enabled for the
-project, and prints what is left. Options: `-WithTray`, `-WithMss`, `-EnableLoadLastProject` (explicit opt-in: UEFN
-reopens the last project at startup instead of showing the HUB; UEFN must be closed), `-RegisterClaude`,
+project, and prints what is left. Options: `-WithTray`, `-WithMss`, `-EnableLoadLastProject` (UEFN
+reopens the last project at startup instead of showing the HUB; UEFN must be closed; recommended, see
+[Step 7](#step-7-recommended-load-on-startup--most-recent-project)), `-RegisterClaude`,
 `-Python <python.exe>`, `-SkipPip`. Run it from an elevated PowerShell once if `Program Files` is write-protected (the
 hook step says so).
 
@@ -30,7 +31,7 @@ Steps 1-6 below are the manual equivalent. Or ask Claude Code: *"Help me set up 
 ## Step 1: Clone and set `UEFN_MCP_PATH`
 
 ```powershell
-git clone https://github.com/EndoWorldsHub/uefn-mcp-server
+git clone https://github.com/kirchuvakov/uefn-mcp-server
 [Environment]::SetEnvironmentVariable('UEFN_MCP_PATH', (Resolve-Path .\uefn-mcp-server).Path, 'User')
 ```
 
@@ -171,6 +172,28 @@ claude mcp list    # expect: uefn ... Connected
 The UEFN MCP tools should now be available. Test with: "ping the UEFN editor". `verse_compile` and `verse_status`
 work as soon as UEFN has the project open, even before the listener runs.
 
+## Step 7 (recommended): Load on Startup = Most Recent Project
+
+UEFN crashes often. To let an agent recover by itself, make UEFN reopen the last project at startup:
+
+- In the editor: **Editor Preferences > Loading & Saving > Load on Startup = Most Recent Project** (the HUB screen
+  has the same selector).
+- Or, with UEFN closed: `setup.ps1 -EnableLoadLastProject`, or let the agent call
+  `uefn_set_load_on_startup('LastProject')` (it keeps a backup; `dry_run=true` shows the change only).
+- The setting is the key `ValkyrieLoadAtStartupMostRecentProject=LastProject` in section
+  `[/Script/ValkyrieEditor.ValkyrieEditorConfig]` of
+  `%LOCALAPPDATA%\UnrealEditorFortnite\Saved\Config\WindowsEditor\EditorPerProjectUserSettings.ini`. UEFN rewrites
+  this file on exit, so edit it only while UEFN is closed.
+
+With this setting, after a crash `uefn_launch_project` relaunches UEFN (pointing the last project at the requested
+one first), the project opens without the HUB, and the listener autostarts through the hook. Without it, UEFN stops on
+the HUB: `uefn_launch_project` returns status `hub`, you click the project, and the agent calls
+`uefn_launch_project(project=..., launch=False)` to wait for the listener. The session tools never send mouse or
+keyboard input. If a crash reporter window is left over after a crash, close it, or let the agent call
+`uefn_launch_project(close_crash_reporter=True)` (it acts only when no editor process runs).
+
+`uefn_status` reports the current setting.
+
 ## Listener Management
 
 ### Using the status window
@@ -194,4 +217,5 @@ Use the `ping` tool, or ask: *"Is the UEFN listener running?"*
 
 ### Shutdown from Claude Code
 
-Use the `shutdown` tool to stop the listener remotely. The port is freed immediately.
+Use the `shutdown` tool to stop the listener remotely. The port is freed immediately. `shutdown` is one of the
+`[experimental]` tools: the agent asks you to confirm before each call (README, "Experimental tools").

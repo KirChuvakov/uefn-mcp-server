@@ -1,8 +1,24 @@
 # Tools Reference
 
-121 tools in 0.5.0 (unreleased; 107 in 0.4.0). The tools up to v0.3.1 have full pages below; the 0.4.0 additions are summarized in [New in v0.4.0](#new-in-v040-summary) and the 0.5.0 desktop and UEFN session tools in [New in v0.5.0](#new-in-v050-desktop-control-and-uefn-session) (each tool's docstring, which Claude Code shows, documents every parameter). Listener tools map 1:1 to a listener command; the Verse build and navigation tools talk to UEFN directly; the desktop and session tools run in the MCP server process.
+110 tools in 0.5.0 (107 in 0.4.0). The tools up to v0.3.1 have full pages below; the 0.4.0 additions are summarized in [New in v0.4.0](#new-in-v040-summary) and the 0.5.0 UEFN session tools in [New in v0.5.0](#new-in-v050-uefn-session) (each tool's docstring, which Claude Code shows, documents every parameter). Listener tools map 1:1 to a listener command; the Verse build and navigation tools talk to UEFN directly; the session tools run in the MCP server process.
 
 ## Conventions (0.5.0)
+
+### `[experimental]` tools: confirm before each call
+
+Seven tools are hard to undo or act outside the open level. They are marked **[experimental]** in this reference:
+their MCP title starts with `[experimental]`, their annotations set `destructiveHint=true`, and their description
+starts with "[experimental] Ask the user to confirm before each call." An agent asks the user before each call.
+
+| Tool | Why |
+|---|---|
+| `execute_python` [experimental] | Runs arbitrary Python inside the editor |
+| `delete_asset` [experimental] | Deletes an asset |
+| `asset_batch_rename` [experimental] | Renames many assets at once |
+| `shutdown` [experimental] | Stops the listener |
+| `verse_push` [experimental] | Pushes changes to a live session |
+| `uefn_launch_project` [experimental] | Starts UEFN; may retarget its last project or stop an orphaned crash reporter |
+| `uefn_set_load_on_startup` [experimental] | Edits UEFN's settings ini |
 
 ### Rotations: named axes
 
@@ -49,8 +65,8 @@ them:
 - Never call those getters from `execute_python` either. `staticmesh_set_lods` once crashed a long session
   (2026-08-24, cause unknown): save first and run it on one mesh per call.
 
-Both conventions are verified offline (`tests/test_rotation_offline.py`, `tests/test_staticmesh_safety_offline.py`);
-the live check in UEFN, `tests/test_safety_fixes_live.py`, is pending.
+Both conventions are covered offline by `tests/test_rotation_offline.py` and `tests/test_staticmesh_safety_offline.py`;
+`tests/test_safety_fixes_live.py --yes-touch-editor` checks them in UEFN (scratch level; spawns and deletes a test cube).
 
 ---
 
@@ -75,7 +91,7 @@ Check if the UEFN editor listener is running and responsive.
 
 ---
 
-### `execute_python`
+### `execute_python` [experimental]
 
 Execute arbitrary Python code inside the UEFN editor. This is the most powerful tool — it can do anything the `unreal` module supports.
 
@@ -403,7 +419,7 @@ Rename or move an asset.
 
 ---
 
-### `delete_asset`
+### `delete_asset` [experimental]
 
 Delete an asset.
 
@@ -568,7 +584,7 @@ as is).
 
 ## New in v0.2.0
 
-### `shutdown`
+### `shutdown` [experimental]
 
 Gracefully stop the listener, freeing the port. The listener finishes the current request before shutting down.
 
@@ -966,7 +982,7 @@ Only crash-safe reads in UEFN 42.20: see [Static meshes: only crash-safe reads](
 
 | Tool | Parameters | Purpose |
 |---|---|---|
-| `asset_batch_rename` | `renames` | Rename (and/or move) multiple assets in one transaction. |
+| `asset_batch_rename` [experimental] | `renames` | Rename (and/or move) multiple assets in one transaction. |
 | `asset_set_metadata` | `asset_path`, `tag`, `value` | Set a metadata tag on an asset (e.g. 'Author', 'Category', 'Rarity'). |
 | `asset_get_metadata` | `asset_path` | Read all metadata tags on an asset. |
 | `asset_remove_metadata` | `asset_path`, `tag` | Remove a metadata tag from an asset. |
@@ -1020,7 +1036,7 @@ VerseWorkflowServer on TCP `127.0.0.1:1962` (`VERSE_WORKFLOW_HOST` / `VERSE_WORK
 |---|---|---|
 | `verse_compile` | — | Compile the Verse project in the open UEFN editor and return errors/warnings. |
 | `verse_status` | — | Report current Verse build state & push-availability WITHOUT compiling. |
-| `verse_push` | `verse_only` | Push changes to the live UEFN session (equivalent of "Push Changes"). |
+| `verse_push` [experimental] | `verse_only` | Push changes to the live UEFN session (equivalent of "Push Changes"). |
 
 ### Verse navigation (no listener)
 
@@ -1036,47 +1052,18 @@ Persistent `verse-lsp.exe` from the `epicgames.verse` VS Code extension (`VERSE_
 
 ---
 
-## New in v0.5.0: desktop control and UEFN session
+## New in v0.5.0: UEFN session
 
-Host-side tools (Windows): they run in the MCP server process and need neither UEFN nor the listener. Safety rails,
-coordinates, UEFN facts and recipes: [desktop_control.md](desktop_control.md). "Acting" tools obey the rails
-(allowlist `UEFN_DESKTOP_ALLOW`, focus and foreground re-check, top-left-corner kill switch, UIPI check, audit log).
-The anti-cheat-protected Fortnite game client is screenshots only: it gets no input (not even a focus) unless the
-owner opts in with `UEFN_DESKTOP_ALLOW=+FortniteClient-Win64-Shipping` (Epic's terms; the account is at risk).
-
-Coordinates are physical pixels of the virtual desktop (the server is per-monitor DPI aware V2; monitors left of or
-above the primary have negative origins). Pointer tools take `x`, `y` plus either `shot` (a `desktop_screenshot` path
-or `shot_id`: the numbers are pixels of that image) or `relative_to` = `screen` | `monitor` (with `monitor`) |
-`monitor_dip` | `window` | `client` (relative to the target window).
-
-### Desktop control
+Host-side tools (Windows): they run in the MCP server process and need no listener. They read the editor log, UEFN's
+settings ini, the Epic launcher manifests, processes, windows and ports, and send no mouse or keyboard input.
 
 | Tool | Parameters | Acting | Purpose |
 |---|---|---|---|
-| `desktop_list_windows` | `process`, `title`, `class_name`, `include_hidden`, `limit` | no | Top-level windows in z-order (process, pid, class, rect, monitor, visible / minimized / foreground, `input_allowed`), monitors, virtual desktop, cursor, kill-switch state, allowlist and `allowlist_warnings`, DPI awareness. |
-| `desktop_screenshot` | `monitor`, `process`, `title`, `class_name`, `region`, `output_path`, `max_long_edge`, `max_pixels`, `full_resolution`, `count`, `interval_sec` | no | PNG of a region, a window or a monitor (0 = all); `path`, `shot_id`, `mapping` (`screen = origin + floor((image + 0.5) * scale)`), cursor position in the image, windows covering the target; bursts up to 120 s. |
-| `desktop_focus_window` | `process`, `title`, `class_name`, `timeout_sec` | yes | Restore and bring to the foreground, verified; reports the method that worked. |
-| `desktop_click` | `x`, `y`, `shot`, `relative_to`, `monitor`, `process`, `title`, `button`, `double`, `modifiers`, `hold_ms` | yes | Click after focusing the target; the window under the point must be the target's process. |
-| `desktop_move` | `x`, `y`, `shot`, `relative_to`, `monitor`, `process`, `title` | yes | Hover. |
-| `desktop_drag` | `x1`, `y1`, `x2`, `y2`, `shot`, `relative_to`, `monitor`, `process`, `title`, `button`, `duration_ms` | yes | Press, move in steps, release; aborts and releases if the user moves the mouse. |
-| `desktop_scroll` | `x`, `y`, `clicks`, `horizontal`, `shot`, `relative_to`, `monitor`, `process`, `title` | yes | Wheel notches (positive = up / right), -50..50. |
-| `desktop_type` | `text`, `process`, `title`, `interval_ms`, `sensitive` | yes | Unicode text into the focused control (newline = Enter, tab = Tab), max 4000 characters; `sensitive` redacts it in the log. |
-| `desktop_key` | `keys`, `process`, `title`, `repeat`, `interval_ms`, `hold_ms`, `allow_editor_close` | yes | A key or combo (`f5`, `ctrl+s`, `alt+f4`, `enter`, `esc`, `ctrl+plus`); `alt+f4` on UEFN needs `allow_editor_close`. |
-| `desktop_close_window` | `process`, `title`, `class_name`, `all_matches`, `wait_sec`, `allow_editor_main` | yes | `WM_CLOSE` (like the X button); several matches need `all_matches`; UEFN editor windows need `allow_editor_main`. |
-| `desktop_wait_for_window` | `process`, `title`, `class_name`, `gone`, `timeout_sec`, `interval_sec` | no | Wait for a window to appear (or disappear). |
+| `uefn_status` | `project`, `probe_ports` | no | State (`not_running`, `starting`, `hub`, `opening`, `project_open`, `other_project_open`, `open_failed`, `crash_dialog`) from the editor log, windows (responding?), crash reporter, Python / listener / Toolsets markers, ports, "Load on Startup", hook, install; hints. |
+| `uefn_launch_project` [experimental] | `project`, `launch`, `launch_via`, `retarget_last_project`, `enable_load_last_project`, `wait_sec`, `hub_grace_sec`, `wait_for_listener`, `listener_wait_sec`, `close_crash_reporter` | yes | Start UEFN if needed (Epic launcher URI or exe), wait for the project, then for the listener. If UEFN stops on the HUB it returns `status="hub"`: the user opens the project, then call again with `launch=False`. `close_crash_reporter=true` (default false) stops a crash reporter left over from a crash, only when no editor process runs. Never closes or kills an editor. Results: `ready`, `project_open`, `project_open_no_listener`, `hub`, `crash_dialog`, `other_project_open`, `open_failed`, `not_running`, `timeout`. |
+| `uefn_set_load_on_startup` [experimental] | `value` (`HomeScreen` / `LastProject`), `dry_run` | yes | UEFN's "Load on Startup" (`ValkyrieLoadAtStartupMostRecentProject` in `EditorPerProjectUserSettings.ini`). UEFN must be closed; backup kept. |
 
-Key names for `desktop_key`: `a`-`z`, `0`-`9`, `f1`-`f24`, `enter`/`return`, `esc`/`escape`, `tab`, `space`,
-`backspace`, `delete`/`del`, `insert`/`ins`, `home`, `end`, `pageup`/`pgup`, `pagedown`/`pgdn`, `up`, `down`, `left`,
-`right`, `ctrl`/`control`, `shift`, `alt`, `win`, `lctrl`, `rctrl`, `lshift`, `rshift`, `lalt`, `ralt`, `rwin`,
-`apps`/`contextmenu`, `capslock`, `numlock`, `scrolllock`, `printscreen`, `pause`, `num0`-`num9`, `add`, `subtract`,
-`multiply`, `divide`, `decimal`, `separator`, `minus`, `equals`/`plus` (the `=/+` key), `comma`, `period`, `slash`,
-`backslash`, `semicolon`, `quote`, `backquote`, `bracketleft`, `bracketright`, media keys (`volumeup`, `playpause`, ...).
-`+` joins keys; `ctrl++` is Ctrl + the plus key.
-
-### UEFN session
-
-| Tool | Parameters | Acting | Purpose |
-|---|---|---|---|
-| `uefn_status` | `project`, `probe_ports` | no | State (`not_running`, `starting`, `hub`, `opening`, `project_open`, `other_project_open`, `open_failed`, `crash_dialog`) from the editor log, windows (responding?), crash dialog, Python / listener / Toolsets markers, ports, "Load on Startup", hook, install; hints. |
-| `uefn_launch_project` | `project`, `launch`, `launch_via`, `retarget_last_project`, `enable_load_last_project`, `wait_sec`, `hub_grace_sec`, `focus_hub`, `wait_for_listener`, `listener_wait_sec` | yes | Start UEFN if needed (Epic launcher URI or exe), wait for the project or the HUB (`status="hub"` returns a screenshot to pick the tile), then for the listener. Results: `ready`, `project_open_no_listener`, `hub`, `crash_dialog`, `other_project_open`, `open_failed`, `not_running`, `timeout`. |
-| `uefn_set_load_on_startup` | `value` (`HomeScreen` / `LastProject`), `dry_run` | yes | Owner opt-in: UEFN's "Load on Startup". UEFN must be closed; backup kept. |
+**Recommended:** set "Load on Startup" to Most Recent Project (Editor Preferences > Loading & Saving, the HUB
+selector, or `uefn_set_load_on_startup('LastProject')` with UEFN closed). Then `uefn_launch_project` recovers from a
+crash on its own: UEFN relaunches, the project opens without the HUB and the listener autostarts through the hook.
+Without it, the user clicks the project on the HUB after every relaunch.

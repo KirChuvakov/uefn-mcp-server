@@ -6,34 +6,34 @@ Control [UEFN](https://dev.epicgames.com/documentation/en-us/fortnite/unreal-edi
 Claude Code  <--stdio-->  MCP Server (mcp_server.py)  <--HTTP 127.0.0.1:8765-->  Listener (uefn_listener.py, inside UEFN)
                                    |--TCP 127.0.0.1:1962-->  UEFN VerseWorkflowServer   (verse_compile / verse_status / verse_push)
                                    |--stdio------------->  verse-lsp.exe                (verse_symbols / verse_hover / ...)
-                                   '--Win32 (ctypes)---->  desktop: windows, screenshots, mouse/keyboard (desktop_* / uefn_*)
+                                   '--files / Win32 ---->  editor log, settings ini, processes   (uefn_status / uefn_launch_project / ...)
 ```
 
-- **121 tools**: actors, assets, levels, viewport, materials, Niagara, animations, static meshes, data tables, asset validation, device `@editable` wiring, Play-In-Editor control, StaticMeshActor scatter, Verse source introspection, Verse compile/push, Verse code navigation, desktop control, UEFN launch / HUB handling, and arbitrary Python execution
+- **110 tools**: actors, assets, levels, viewport, materials, Niagara, animations, static meshes, data tables, asset validation, device `@editable` wiring, Play-In-Editor control, StaticMeshActor scatter, Verse source introspection, Verse compile/push, Verse code navigation, UEFN session status / launch, and arbitrary Python execution
 - **Zero C++ compilation** — pure Python, works across UEFN versions
 - **Main-thread safe** — all `unreal.*` calls dispatched via editor tick callback
 - **Autostart** — the listener starts by itself when a project opens (see [Auto-start](#auto-start))
-- **Desktop control with safety rails** — for UI that editor Python cannot reach (crash dialog, HUB, Launch Session, modal dialogs) and screenshots of the Fortnite client; see [Desktop control](#desktop-control)
+- **Crash recovery** — the UEFN session tools read the editor state and relaunch UEFN after a crash; see [UEFN session and crash recovery](#uefn-session-and-crash-recovery)
+- **No input simulation** — the server never sends mouse or keyboard input; tools that are hard to undo are tagged [experimental](#experimental-tools)
 
-## What's new in 0.5.0 (unreleased)
+## What's new in 0.5.0
 
-- **Desktop control** (`desktop_control.py`, 11 tools): list windows, screenshots with a pixel mapping, focus, click,
-  move, drag, scroll, Unicode typing, key combos, graceful close, wait for windows. Input only into allowlisted
-  processes after a verified focus, a top-left-corner kill switch, an audit log.
-- **UEFN session** (`uefn_session.py`, 3 tools): `uefn_status` (state from the editor log and ports),
-  `uefn_launch_project` (start UEFN, open a project even when UEFN boots to the HUB, wait for the listener),
-  `uefn_set_load_on_startup` (owner opt-in).
-- **`setup.ps1`**: one idempotent onboarding step for a new machine (`-DryRun`).
+- **UEFN session** (`uefn_session.py`, 3 tools): `uefn_status` (read-only state from the editor log, processes and
+  ports), `uefn_launch_project` (start UEFN, open a project, wait for the listener; can stop a crash reporter left over
+  from a crash), `uefn_set_load_on_startup`. They send no mouse or keyboard input: when UEFN stops on the HUB, the user
+  opens the project.
+- **[experimental] tag**: 7 tools that are hard to undo or act outside the open level ask the user to confirm before
+  each call. See [Experimental tools](#experimental-tools).
+- **`setup.ps1`**: one idempotent setup step for a new machine (`-DryRun`).
 - **Safety fixes** (listener protocol 0.3.3): rotations are named axes `{"pitch", "yaw", "roll"}` (a documented
   `[pitch, yaw, roll]` list used to be applied as `[roll, pitch, yaw]`); the `staticmesh_*` tools stop calling the
-  getters that crash UEFN 42.20; the Fortnite game client left the default input allowlist (screenshots only unless
-  the owner opts in). See [Conventions](docs/tools_reference.md#conventions-050).
+  getters that crash UEFN 42.20. See [Conventions](docs/tools_reference.md#conventions-050).
 
-Full list: [CHANGELOG.md](CHANGELOG.md); recipes: [docs/desktop_control.md](docs/desktop_control.md).
+Full list: [CHANGELOG.md](CHANGELOG.md).
 
 ## What's new in 0.4.0
 
-The EndoWorlds fork is merged into this repo: 79 new tools (materials, Niagara, animation, static meshes, asset
+A community fork was merged into this repo: 79 new tools (materials, Niagara, animation, static meshes, asset
 management, data tables, validation, screenshots, device `@editable` fields, Play-In-Editor, scatter, Verse
 introspection), a Verse module that compiles, pushes and navigates Verse **without the editor listener**, listener
 autostart through `ensure_mcp_hook.ps1`, a system-tray icon, and a listener that survives project switches.
@@ -41,10 +41,10 @@ Full list: [CHANGELOG.md](CHANGELOG.md).
 
 ## Quick Start
 
-### 0. One step: `setup.ps1` (the onboarding step)
+### 0. One step: `setup.ps1`
 
 ```powershell
-git clone https://github.com/EndoWorldsHub/uefn-mcp-server
+git clone https://github.com/kirchuvakov/uefn-mcp-server
 powershell -NoProfile -ExecutionPolicy Bypass -File .\uefn-mcp-server\setup.ps1 -DryRun    # shows what it would do
 powershell -NoProfile -ExecutionPolicy Bypass -File .\uefn-mcp-server\setup.ps1 -ScheduleHook -Project "<path>\<Island>.uefnproject"
 ```
@@ -53,8 +53,15 @@ The script is idempotent (run it again after moving the clone or after a Fortnit
 3.10+, installs `requirements.txt`, sets `UEFN_MCP_PATH`, installs the listener autostart hook (`-ScheduleHook` adds the
 hourly task that re-adds it after Fortnite updates), reports the UEFN install, "Load on Startup" and whether Python is
 enabled for your project, and prints what is left. Options: `-WithTray` (tray-icon packages into `vendor/`),
-`-WithMss`, `-EnableLoadLastProject` (opt-in: UEFN reopens the last project at startup instead of the HUB),
-`-RegisterClaude` (user-scope registration), `-Python <python.exe>`, `-DryRun`.
+`-WithMss`, `-EnableLoadLastProject` (UEFN reopens the last project at startup instead of the HUB; recommended, see
+below), `-RegisterClaude` (user-scope registration), `-Python <python.exe>`, `-SkipPip`, `-DryRun`.
+
+> **Recommended: Load on Startup = Most Recent Project.** UEFN crashes often. To let an agent recover by itself, set
+> **Editor Preferences > Loading & Saving > Load on Startup** to **Most Recent Project** (the HUB screen has the same
+> selector). Then `uefn_launch_project` relaunches UEFN, the project opens without the HUB, and the listener autostarts
+> through the [hook](#auto-start). Without it, UEFN stops on the HUB after every relaunch and you have to click the
+> project. With UEFN closed you can also run `setup.ps1 -EnableLoadLastProject` or let the agent call
+> `uefn_set_load_on_startup('LastProject')`; details in [UEFN session and crash recovery](#uefn-session-and-crash-recovery).
 
 Steps 1-6 below are what the script automates, plus the two things only you can do: enable Python in each project
 (step 3) and approve the server in Claude Code (step 5). Prefer a conversation? Ask Claude Code *"Help me set up UEFN
@@ -63,7 +70,7 @@ MCP server"*.
 ### 1. Clone and point `UEFN_MCP_PATH` at the clone
 
 ```powershell
-git clone https://github.com/EndoWorldsHub/uefn-mcp-server
+git clone https://github.com/kirchuvakov/uefn-mcp-server
 [Environment]::SetEnvironmentVariable('UEFN_MCP_PATH', (Resolve-Path .\uefn-mcp-server).Path, 'User')
 ```
 
@@ -212,8 +219,10 @@ per-user shim `Documents\UnrealEngine\Python\init_unreal.py` if an older install
 | **Verse introspection (5)** | `verse_list_services`, `verse_list_editables`, `verse_service_graph`, `verse_find_resource_usage`, `verse_check_editable_coverage` | listener |
 | **Verse build (3)** | `verse_compile`, `verse_status`, `verse_push` | UEFN open (no listener) |
 | **Verse navigation (5)** | `verse_symbols`, `verse_hover`, `verse_definition`, `verse_find_symbol`, `verse_lsp_restart` | `epicgames.verse` VS Code extension + a UEFN-generated workspace (no listener) |
-| **Desktop control (11)** | `desktop_list_windows`, `desktop_screenshot`, `desktop_focus_window`, `desktop_click`, `desktop_move`, `desktop_drag`, `desktop_scroll`, `desktop_type`, `desktop_key`, `desktop_close_window`, `desktop_wait_for_window` | Windows host (no listener, no extra package) |
 | **UEFN session (3)** | `uefn_status`, `uefn_launch_project`, `uefn_set_load_on_startup` | Windows host (no listener) |
+
+Tools marked [experimental](#experimental-tools) ask the user to confirm before each call: `execute_python`,
+`shutdown`, `delete_asset`, `asset_batch_rename`, `verse_push`, `uefn_launch_project`, `uefn_set_load_on_startup`.
 
 The `execute_python` tool is the most powerful — it runs arbitrary Python code inside the editor with full access to the `unreal` module:
 
@@ -231,38 +240,48 @@ result = [a.get_actor_label() for a in actors]
 > **Timeouts:** a listener call returns after 30 s, but the code keeps running in the editor. Split long jobs into
 > smaller calls and check the editor state afterwards instead of re-running a timed-out call.
 
-## Desktop control
+## Experimental tools
 
-Some UEFN steps have no scripting surface: the crash report dialog, the HUB (project browser) at startup, Launch
-Session, modal dialogs; the Fortnite client of a session is worth capturing too. The `desktop_*` tools see the Windows
-desktop and send real mouse and keyboard input; the `uefn_*` session tools build the common flows on top
-(`uefn_launch_project` starts UEFN, opens a project even when UEFN shows the HUB, and waits for the listener).
-Everything editor Python can do stays with `execute_python` and the editor tools.
+Seven tools do something that is hard to undo or reaches outside the open level: run arbitrary code, delete or rename
+assets, push to a live session, stop the listener, start UEFN or edit its settings. They carry the `[experimental]`
+tag, and an agent should ask the user to confirm before each call:
 
-- **Which tools:** a Claude Code session inside the Claude Desktop app with computer use turned on has the official
-  `mcp__computer-use__*` tools: use those. The Claude Code CLI on Windows has none (its computer-use server is
-  macOS-only): use `desktop_*`. Same recipes; one driver at a time.
-- **Safety rails** (input and other acting calls): input goes only to allowlisted processes (UEFN editor and HUB,
-  `CrashReportClientEditor`, Epic Games Launcher; `UEFN_DESKTOP_ALLOW` replaces the list, `+name` extends it, `*`
-  disables the check and is dangerous); every call names or resolves its target window, focuses it and re-checks that
-  the foreground window belongs to an allowed process right before sending; clicks also check the window under the
-  point; elevated targets are refused (UIPI); closing the UEFN editor window needs an explicit flag.
-- **Fortnite client: screenshots only.** The game client runs under anti-cheat; synthetic input into it can count as
-  automation under Epic's terms and put the account at risk. It gets no input, not even through `*` or `Fortnite*`,
-  unless the owner explicitly opts in with `UEFN_DESKTOP_ALLOW=+FortniteClient-Win64-Shipping` (then
-  `desktop_list_windows` shows a warning and the audit log marks each call).
-- **Kill switch:** a mouse cursor within 5 px of any monitor's top-left corner makes every acting call refuse. Park the
-  mouse there to stop a runaway agent.
-- **Audit log:** one JSON line per acting call in `%TEMP%\uefn-mcp\desktop_control.log` (rotating); typed text that
-  looks like a password, or goes to a sign-in window, is redacted.
-- **Coordinates:** the server is per-monitor DPI aware (V2): all coordinates are physical pixels of the virtual desktop
-  (negative on monitors left of or above the primary). `desktop_screenshot` returns a mapping; pass `shot=<png path>`
-  to `desktop_click` to click in image pixels.
-- **No UI Automation:** UEFN's Slate UI exposes no UIA tree, so HUB tiles and toolbar buttons are found by vision
-  (screenshot, then click).
+| Tool | Why |
+|------|-----|
+| `execute_python` | Runs arbitrary Python inside the editor |
+| `delete_asset` | Deletes an asset |
+| `asset_batch_rename` | Renames many assets at once |
+| `shutdown` | Stops the listener |
+| `verse_push` | Pushes changes to a live session |
+| `uefn_launch_project` | Starts UEFN; may retarget its last project or stop an orphaned crash reporter |
+| `uefn_set_load_on_startup` | Edits UEFN's settings ini |
 
-Details, UEFN facts and recipes (close the crash dialog, pick a project on the HUB, Launch Session, capture the
-Fortnite client): [docs/desktop_control.md](docs/desktop_control.md).
+The tag shows in three places: the MCP title starts with `[experimental]`, the annotations set `destructiveHint=true`,
+and the description starts with "[experimental] Ask the user to confirm before each call." The server instructions
+repeat the list, so the agent sees the tag before it calls the tool.
+
+## UEFN session and crash recovery
+
+The `uefn_*` tools run in the MCP server process (Windows, no listener needed) and read the editor log, UEFN's settings
+ini, the Epic launcher manifests, processes, windows and ports. They send no mouse or keyboard input.
+
+- `uefn_status`: read-only state (`not_running`, `starting`, `hub`, `opening`, `project_open`, `other_project_open`,
+  `open_failed`, `crash_dialog`), the open project, whether the editor windows respond, the crash reporter, Python /
+  listener / Toolsets markers, ports, "Load on Startup", the autostart hook, and next-step hints.
+- `uefn_launch_project`: starts UEFN if needed (Epic launcher URI or the editor exe), waits for the project, then for
+  the listener. If UEFN stops on the HUB (project browser) it returns status `hub`: the user opens the project, then the
+  agent calls again with `launch=False`. `close_crash_reporter=true` (default false) stops a crash reporter left over
+  from a crash, only when no editor process runs. It never closes or kills an editor.
+- `uefn_set_load_on_startup`: `HomeScreen` (the HUB) or `LastProject` (Most Recent Project). UEFN must be closed
+  (it rewrites the file on exit); a backup is kept; `dry_run` shows the change only.
+
+**Load on Startup = Most Recent Project** is what makes unattended recovery work. Set it in **Editor Preferences >
+Loading & Saving > Load on Startup** (or with the selector on the HUB screen). The ini key is
+`ValkyrieLoadAtStartupMostRecentProject=LastProject` in section `[/Script/ValkyrieEditor.ValkyrieEditorConfig]` of
+`%LOCALAPPDATA%\UnrealEditorFortnite\Saved\Config\WindowsEditor\EditorPerProjectUserSettings.ini`; with UEFN closed,
+`uefn_set_load_on_startup('LastProject')` or `setup.ps1 -EnableLoadLastProject` writes it. With this setting a crash
+costs one call: `uefn_launch_project` relaunches UEFN (pointing the last project at the requested one first), the
+project opens without the HUB, and the listener autostarts through the [hook](#auto-start).
 
 ## Architecture
 
@@ -274,8 +293,7 @@ The system uses two independently running Python processes, plus two direct chan
 | **MCP Server** | `mcp_server.py` | External process | 3.10+ (system) | `mcp` SDK; optional `mss` |
 | **Verse build** | `verse_workflow.py` | MCP server process | — | UEFN's VerseWorkflowServer on TCP 1962 |
 | **Verse navigation** | `verse_lsp_service.py` | MCP server process (spawns `verse-lsp.exe`) | — | `epicgames.verse` VS Code extension |
-| **Desktop control** | `desktop_control.py` | MCP server process | — | Win32 through `ctypes` (no package) |
-| **UEFN session** | `uefn_session.py` | MCP server process | — | editor log, settings ini, Epic launcher manifests, ports |
+| **UEFN session** | `uefn_session.py`, `win_procs.py` | MCP server process | — | editor log, settings ini, Epic launcher manifests, ports; read-only Win32 process / window queries through `ctypes` |
 
 **Why two processes?**
 - All `unreal.*` calls must happen on the editor's main thread (tick callback)
@@ -295,10 +313,6 @@ See [docs/architecture.md](docs/architecture.md) for details.
 | `VERSE_WORKSPACE_FILE` | `verse_lsp_service.py` | newest `*.code-workspace` in `%LOCALAPPDATA%\UnrealEditorFortnite\Saved\VerseProject` | Workspace of the open project |
 | `UEFN_FORTNITE_DIR`, `UEFN_MCP_HOOK_TARGET` | `ensure_mcp_hook.ps1` | see [Auto-start](#auto-start) | Fortnite install root, file the hook runs |
 | `VERSE_TEST_FILE` | `tests/test_verse_tools_live.py` | `Core/service.verse` | File for the LSP smoke test |
-| `UEFN_DESKTOP_ALLOW` | `desktop_control.py` | UEFN editor, `CrashReportClientEditor*`, `EpicGamesLauncher` | Processes that may receive desktop input: `a,b` replaces, `+a,b` extends, `*` disables the check (dangerous). The Fortnite game client only when named, with the owner's consent: `+FortniteClient-Win64-Shipping` (account risk, see [Desktop control](#desktop-control)) |
-| `UEFN_DESKTOP_DISABLE` | `desktop_control.py` | — | `1` refuses every acting desktop call |
-| `UEFN_DESKTOP_LOG` | `desktop_control.py` | `%TEMP%\uefn-mcp\desktop_control.log` | Audit log (JSON lines, rotating) |
-| `UEFN_DESKTOP_SHOTS` | `desktop_control.py` | `%TEMP%\uefn-mcp\shots` | Default screenshot folder |
 | `UEFN_EDITOR_EXE` | `uefn_session.py` | Epic launcher manifest, then `UEFN_FORTNITE_DIR`, then the default install folder | Editor executable for `uefn_launch_project` |
 | `UEFN_PROJECT` | `uefn_session.py` | `LastProjectFileName` of UEFN | Default project for `uefn_launch_project` |
 | `UEFN_SAVED_DIR` | `uefn_session.py` | `%LOCALAPPDATA%\UnrealEditorFortnite\Saved` | UEFN's per-user folder (logs, settings) |
@@ -321,7 +335,7 @@ Custom port example:
 
 UEFN exposes a large subset of the Unreal Python API, but a few editor actions have no scripting surface:
 
-- **Push Changes / Verse build** — no Python API (`FortniteEditorLibrary`, `FortEditorUtilityLibrary`, `Fort*`/`Creative*` libraries and console commands such as `UEFN.PushChanges` do not expose them). `verse_compile` and `verse_push` use the Verse workflow socket instead, the channel of the VS Code extension. `verse_push` works only while a session runs; new textures and other new assets still need a session relaunch. Launch Session and the other toolbar actions are reachable through the [desktop tools](#desktop-control) (screenshot, then click or hotkey).
+- **Push Changes / Verse build** — no Python API (`FortniteEditorLibrary`, `FortEditorUtilityLibrary`, `Fort*`/`Creative*` libraries and console commands such as `UEFN.PushChanges` do not expose them). `verse_compile` and `verse_push` use the Verse workflow socket instead, the channel of the VS Code extension. `verse_push` works only while a session runs; new textures and other new assets still need a session relaunch. Launch Session and the other toolbar actions have no scripting surface either: the user clicks them.
 - **Verse `@editable` fields** — ScriptDevice bindings block `get_editor_property` on Verse-declared fields, and plain-name writes fail ("Failed to find property"). `device_list_editables` / `device_set_editable` cover native device properties; for Verse fields use `execute_python` on the device's inner object (mangled name `__verse_0x<HASH>_<Field>`), or read them with the official `unreal-mcp` DeviceToolset. `verse_check_editable_coverage` audits the sources instead of the live level.
 - **`get_editor_log`** picks the newest `.log` in the project log folder, which can be the revision-control log (upstream PR #3).
 - **Static-mesh metadata in UEFN 42.20** — the `StaticMeshEditorSubsystem` getters (`has_vertex_colors`, `get_lod_count`, `get_number_verts`, ...), `StaticMesh.get_num_triangles` / `get_num_sections` and `BodySetup.agg_geom.export_text()` crashed the editor. `staticmesh_get_info` reads asset-registry tags, slots, bounds and Nanite settings instead and reports the rest as "not available safely in UEFN 42.20" ([details](docs/tools_reference.md#static-meshes-only-crash-safe-reads-uefn-4220)).
@@ -333,10 +347,8 @@ UEFN exposes a large subset of the Unreal Python API, but a few editor actions h
 | `python tests/test_mcp_server_offline.py` | host Python with `requirements.txt`; no UEFN, no listener, no network |
 | `python tests/test_rotation_offline.py` | host Python with `requirements.txt`; checks the listener source and handlers against a fake `unreal` (named axes, keyword-built rotators) and the server schemas / listener-version guard |
 | `python tests/test_staticmesh_safety_offline.py` | nothing: no crash-list getter anywhere in the listener; `staticmesh_*` handlers against a fake `unreal` whose crashing getters raise |
-| `python tests/test_desktop_control_offline.py [--live]` | nothing; `--live` adds a read-only smoke (windows, cursor, monitor-1 screenshots; no input) |
 | `python tests/test_uefn_session_offline.py` | nothing (temp files only) |
-| `python tests/test_safety_fixes_live.py --yes-touch-editor [--camera] [--niagara <system>] [--mesh <mesh>]` | **pending, not run yet**: UEFN with a scratch level; spawns and deletes a test cube (never saves), checks the rotation axes and the safe static-mesh reads end to end |
-| `python tests/test_desktop_input_live.py --yes-send-input` | an idle Windows desktop: moves the mouse and types into its own sandbox window only |
+| `python tests/test_safety_fixes_live.py --yes-touch-editor [--camera] [--niagara <system>] [--mesh <mesh>]` | UEFN with a scratch level; spawns and deletes a test cube (never saves), checks the rotation axes and the safe static-mesh reads end to end |
 | `python tests/test_verse_tools_live.py lsp [file.verse]` | `epicgames.verse` extension + a UEFN-generated workspace (UEFN may be closed) |
 | `python tests/test_verse_tools_live.py compile` | UEFN open with the project; triggers a real Verse build |
 | `tests/test_feasibility.py` | run inside UEFN (Tools > Execute Python Script) before the listener starts: it binds ports 8765/8766 |
@@ -357,10 +369,9 @@ Run via **Tools > Execute Python Script** in the UEFN menu bar.
 | Document | Description |
 |----------|-------------|
 | [Setup Guide](docs/setup.md) | Detailed installation and configuration |
-| [Tools Reference](docs/tools_reference.md) | Every tool: detailed pages for the 0.1-0.3 tools, a summary table for the 0.4.0 additions |
+| [Tools Reference](docs/tools_reference.md) | Every tool: detailed pages for the 0.1-0.3 tools, summary tables for the 0.4.0 and 0.5.0 additions |
 | [Architecture](docs/architecture.md) | How the two-component system works internally |
 | [Troubleshooting](docs/troubleshooting.md) | Common issues and solutions |
-| [Desktop Control](docs/desktop_control.md) | Desktop and UEFN session tools: safety rails, coordinates, UEFN facts, recipes |
 | [UEFN Python Capabilities](docs/uefn_python_capabilities.md) | Full API capabilities map — 37K types across 30 domains |
 | [Changelog](CHANGELOG.md) | Release history |
 
@@ -370,7 +381,7 @@ Run via **Tools > Execute Python Script** in the UEFN menu bar.
 - Python 3.10+ on the host system, `pip install -r requirements.txt`
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI
 - Optional: the `epicgames.verse` VS Code extension (Verse navigation tools), `mss` (`screenshot_desktop`), `pystray` + `Pillow` in `vendor/` (tray icon)
-- Desktop control and the UEFN session tools: Windows; nothing to install
+- UEFN session tools: Windows; nothing to install
 
 ## License
 

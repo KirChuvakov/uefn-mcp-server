@@ -273,54 +273,37 @@ next project open when the autostart hook is installed; otherwise start it by ha
 
 Each editor instance needs its own listener on a different port. The auto-detect range (8765-8770) supports up to 6 simultaneous instances. Configure each MCP server connection with the correct port.
 
-## Desktop control (desktop_* / uefn_* tools)
+## UEFN session (uefn_* tools)
 
-### "kill switch: the mouse cursor is at ..."
+### UEFN crashed: let the agent recover by itself
 
-The cursor sits within 5 px of a monitor's top-left corner: every acting desktop call is refused on purpose (the owner's
-emergency stop). Move the mouse away when input is wanted again.
-
-### "... is not in the desktop allowlist" / "the foreground switched to ..."
-
-Input goes only to allowlisted processes (UEFN, its crash reporter, the Epic launcher), and only while one of them is in
-the foreground. Another app took the foreground (a notification, the owner clicking): retry after checking
-`desktop_list_windows`. To allow another app, set `UEFN_DESKTOP_ALLOW=+<process>` in the `env` of the `uefn` server.
-
-### "Desktop input into the Fortnite game client is off by default"
-
-**Expected.** The Fortnite client (`FortniteClient-Win64-Shipping*`, `FortniteLauncher`) runs under anti-cheat, and
-synthetic input there can count as automation under Epic's terms: the account is at risk. Since 0.5.0 it is not in the
-default allowlist, and neither `*` nor a broad glob such as `Fortnite*` lets input reach it. Screenshots and window
-lists still work (`desktop_screenshot(process="FortniteClient-Win64-Shipping*")`); the client must already be in front
-(Launch Session brings it up; otherwise ask the owner to click it). Only the owner can opt in, by setting
-`UEFN_DESKTOP_ALLOW=+FortniteClient-Win64-Shipping` in the server's `env`; `desktop_list_windows` then shows an
-`allowlist_warnings` entry and the audit log marks each such call `protected_target`.
-
-### "could not bring ... to the foreground"
-
-Windows' focus-stealing protection won against every workaround (the ALT tap included), which happens while another
-app holds input (for example a fullscreen game). Click the target once by hand, or retry when the machine is idle.
-
-### Clicks do nothing / land elsewhere
-
-- The target runs elevated: refused (UIPI would drop the input silently). Run both at the same privilege level.
-- A secure desktop (UAC prompt, lock screen) is active: SendInput and captures fail until it closes.
-- Coordinates: pass `shot=<png path>` when the numbers come from a screenshot; screen coordinates are physical pixels
-  (negative on monitors left of the primary).
-
-### Screenshot is black or shows another window
-
-Captures read the screen: a minimized window cannot be captured (`desktop_focus_window` first), a covered window shows
-what covers it (`occluded_by` in the result), and exclusive-fullscreen games can capture black (use windowed or
-borderless mode).
+UEFN crashes often. Set **Editor Preferences > Loading & Saving > Load on Startup = Most Recent Project** (the HUB
+screen has the same selector; with UEFN closed, `uefn_set_load_on_startup('LastProject')` or
+`setup.ps1 -EnableLoadLastProject` writes `ValkyrieLoadAtStartupMostRecentProject=LastProject` into
+`%LOCALAPPDATA%\UnrealEditorFortnite\Saved\Config\WindowsEditor\EditorPerProjectUserSettings.ini`). Then one call to
+`uefn_launch_project(project=...)` relaunches UEFN, the project opens without the HUB, and the listener autostarts
+through the hook. Without this setting UEFN stops on the HUB after every relaunch and the user has to click the
+project.
 
 ### `uefn_launch_project` returns "hub"
 
-UEFN's "Load on Startup" is "Home Panel": pick the project's tile from the returned screenshot, click Launch, then call
-`uefn_launch_project(project=..., launch=False)`. Opt-in alternative (owner's decision, UEFN closed):
-`uefn_set_load_on_startup("LastProject")` or `setup.ps1 -EnableLoadLastProject`.
+UEFN's "Load on Startup" is "Home Panel", so UEFN stopped on the HUB (project browser). The server sends no mouse or
+keyboard input: open the project yourself, then the agent calls `uefn_launch_project(project=..., launch=False)` to
+wait for the listener. To skip the HUB next time, see the previous entry.
+
+### `uefn_status` / `uefn_launch_project` report "crash_dialog"
+
+The crash reporter (`CrashReportClientEditor`) is showing. While an editor process still runs, wait for it to exit.
+When it is left over from a crash (no editor process), close it, or let the agent call
+`uefn_launch_project(close_crash_reporter=True)`, which stops it (only when no editor process runs) and then launches
+UEFN. The session tools never close or kill an editor.
+
+### `uefn_set_load_on_startup` refuses: UEFN is running
+
+UEFN rewrites `EditorPerProjectUserSettings.ini` on exit, so an edit made while it runs would be lost. Close UEFN and
+call again, or change the setting in the editor (Editor Preferences > Loading & Saving > Load on Startup).
 
 ### `uefn_status` says the listener is "busy"
 
-The listener port accepts connections but did not answer within 2 s: a long command is running in the editor (often
-another agent's). Wait and re-check before restarting anything.
+The listener port accepts connections but did not answer within 2 s: a long command is running in the editor. Wait
+and re-check before restarting anything.

@@ -197,22 +197,32 @@ Eight tools bypass the listener and work whenever UEFN has the project open, eve
   UEFN generates (project Content plus the Verse / Fortnite / UnrealEngine digests). Navigation only: compile errors
   come from `verse_compile`.
 
-## Component 4: desktop control and UEFN session (0.5.0)
+## Component 4: UEFN session (0.5.0)
 
-Two more modules run inside the MCP server process and need neither UEFN nor the listener (Windows only, `ctypes`):
+Two more modules run inside the MCP server process and need neither the listener nor any extra package (Windows only,
+`ctypes`). Neither sends mouse or keyboard input.
 
-- **`desktop_control.py`** (11 `desktop_*` tools). At import it makes the process per-monitor DPI aware (V2), so every
-  coordinate is a physical pixel of the virtual desktop. Windows come from `EnumWindows` (DWM frame bounds, cloaking,
-  owner, process image), monitors from `EnumDisplayMonitors` (same order as `mss`), captures from GDI `BitBlt` /
-  `StretchBlt(HALFTONE)` written as PNG with `zlib`, input from `SendInput` (absolute moves aimed at pixel centers,
-  Unicode typing, virtual keys with scan codes). Acting calls pass the safety rails first (allowlist, focus and
-  foreground re-check, kill switch, UIPI) and write one JSON line to the audit log.
 - **`uefn_session.py`** (3 `uefn_*` tools). Reads the editor log incrementally (markers such as `Opening project` /
   `Successfully opened project` / `[MCP] Auto-started`), UEFN's `EditorPerProjectUserSettings.ini` (Load on Startup,
-  last project, per-project Python switch), the Epic launcher manifests (editor exe, launch URI) and probes the ports;
-  `uefn_launch_project` combines them with the desktop tools (HUB screenshot). Also a CLI for `setup.ps1`.
+  last project, per-project Python switch), the Epic launcher manifests (editor exe, launch URI) and probes the ports,
+  then classifies the session (`not_running`, `starting`, `hub`, `opening`, `project_open`, `other_project_open`,
+  `open_failed`, `crash_dialog`). `uefn_launch_project` starts UEFN through the launcher URI or the exe and waits on
+  these signals; when UEFN stops on the HUB it returns `hub` and the user opens the project. With "Load on Startup" =
+  Most Recent Project it first points `LastProjectFileName` at the requested project, so a relaunch after a crash
+  opens it without the HUB. Also a CLI for `setup.ps1` (`status`, `find-install`, `set-load-on-startup`).
+- **`win_procs.py`**: read-only process and window queries (`CreateToolhelp32Snapshot`, `EnumWindows`, hung-window
+  checks) that tell whether the editor runs, whether its windows respond and whether the crash reporter shows. Its
+  only acting call terminates an orphaned crash reporter, used by `uefn_launch_project(close_crash_reporter=True)` when
+  no editor process runs.
 
-Details: [desktop_control.md](desktop_control.md).
+## Experimental tag (0.5.0)
+
+`tool_tags.py` defines the `[experimental]` tag for tools that are hard to undo or act outside the open level
+(`execute_python`, `delete_asset`, `asset_batch_rename`, `shutdown`, `verse_push`, `uefn_launch_project`,
+`uefn_set_load_on_startup`). `experimental(title)` returns the keyword arguments for `@mcp.tool(...)`: a title that
+starts with `[experimental]` and `ToolAnnotations(destructiveHint=True)`; each tagged tool's docstring starts with
+"[experimental] Ask the user to confirm before each call." The server instructions list the same tools, and
+`tests/test_mcp_server_offline.py` checks that exactly these seven carry the tag.
 
 ## Autostart (0.4.0)
 

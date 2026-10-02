@@ -3,54 +3,48 @@
 Release versions of the repo. The listener also reports a protocol version in `ping` (`PROTOCOL_VERSION` in
 `uefn_listener.py`); it changes only when the listener/server wire format changes.
 
-## 0.5.0 (unreleased)
+## 0.5.0 — 2026-10-02
 
-121 MCP tools (14 new, all host-side: they run in the MCP server process and need neither UEFN nor the listener).
+110 MCP tools (3 new UEFN session tools, host-side: they run in the MCP server process and need no listener).
 Listener protocol 0.3.3 (was 0.3.2): rotation parameters take named axes and the static-mesh handlers changed (see
-Fixed).
+Fixed). The server sends no mouse or keyboard input anywhere.
 
-### Added — desktop control (`desktop_control.py`, 11 tools, Windows, pure `ctypes`)
+### Added — UEFN session (`uefn_session.py` + `win_procs.py`, 3 tools, Windows)
 
-- `desktop_list_windows`, `desktop_screenshot`, `desktop_focus_window`, `desktop_click`, `desktop_move`,
-  `desktop_drag`, `desktop_scroll`, `desktop_type`, `desktop_key`, `desktop_close_window`, `desktop_wait_for_window`:
-  for UI that editor Python cannot reach (crash report dialog, the HUB, Launch Session, modal dialogs) and screenshots
-  of the Fortnite client.
-- The server process becomes per-monitor DPI aware (V2) at import: every coordinate is a physical pixel of the virtual
-  desktop (negative origins included), matching `mss` / GDI captures. Screenshots are GDI captures written as PNG with
-  `zlib` (no `mss` needed), downscaled for the model by default, with a pixel mapping returned and stored next to the
-  PNG; `desktop_click(shot=...)` clicks in image pixels. Bursts (`count`, `interval_sec`) for session captures.
-- Input through `SendInput`: absolute moves aimed at pixel centers (verified with `GetCursorPos`), buttons, wheel,
-  Unicode typing (`KEYEVENTF_UNICODE`), virtual keys with scan codes and extended flags from an explicit key-name table.
-  Focus with the foreground-lock workarounds (`SetForegroundWindow`, `AttachThreadInput`, `SwitchToThisWindow`, ALT
-  tap), verified afterwards.
-- Safety rails: process allowlist (UEFN editor, `CrashReportClientEditor*`, `EpicGamesLauncher`; `UEFN_DESKTOP_ALLOW`
-  replaces / `+` extends / `*` disables; the Fortnite game client only through an explicit opt-in, see Fixed);
-  every input call resolves and focuses its target and re-checks the foreground right before sending; clicks check the
-  window under the point; kill switch (cursor within 5 px of a monitor's top-left corner); elevated targets refused
-  (UIPI); closing the UEFN editor window (`WM_CLOSE`, `alt+f4`) needs an explicit flag; `UEFN_DESKTOP_DISABLE`; JSON-lines
-  audit log `%TEMP%\uefn-mcp\desktop_control.log` (rotating) with password-like text redacted.
-
-### Added — UEFN session (`uefn_session.py`, 3 tools)
-
-- `uefn_status`: state (`not_running`, `starting`, `hub`, `opening`, `project_open`, `other_project_open`,
-  `open_failed`, `crash_dialog`) from the editor log markers (the window title never names the project), windows,
-  ports (listener 8765-8770 incl. "busy", 1962, 8000), Python-on / listener-autostart / Toolsets markers for the open
-  project, "Load on Startup", the autostart hook, the install; next-step hints.
+- `uefn_status` (read-only): state (`not_running`, `starting`, `hub`, `opening`, `project_open`,
+  `other_project_open`, `open_failed`, `crash_dialog`) from the editor log markers (the window title never names the
+  project), editor windows and whether they respond, the crash reporter, ports (listener 8765-8770 incl. "busy", 1962,
+  8000), Python-on / listener-autostart / Toolsets markers for the open project, "Load on Startup", the autostart hook,
+  the install; next-step hints.
 - `uefn_launch_project`: resolves a project (path, folder or name), starts UEFN through the Epic launcher URI
-  (`Fortnite_Studio`, with sign-in) or the editor exe, waits for the load or the HUB (returns a screenshot + mapping
-  for picking the tile), then waits for the listener and explains a missing one. With "Load on Startup" = Most Recent
-  Project it points `LastProjectFileName` at the requested project first (UEFN closed only).
+  (`Fortnite_Studio`, with sign-in) or the editor exe, waits for the project load, then for the listener, and explains
+  a missing one. With "Load on Startup" = Most Recent Project it points `LastProjectFileName` at the requested project
+  first (UEFN closed only), so the project opens without the HUB. When UEFN stops on the HUB it returns status `hub`:
+  the user opens the project, then the agent calls again with `launch=False`. `close_crash_reporter` (default false)
+  stops a crash reporter left over from a crash, only when no editor process runs. It never closes or kills an editor.
 - `uefn_set_load_on_startup`: `ValkyrieLoadAtStartupMostRecentProject` = `HomeScreen` | `LastProject` in
   `EditorPerProjectUserSettings.ini` (`[/Script/ValkyrieEditor.ValkyrieEditorConfig]`), byte-exact edit with a
-  backup, refused while UEFN runs. Opt-in only.
-- Verified facts behind them: no UI Automation tree in UEFN's Slate UI (vision needed on the HUB); log markers; the
-  settings keys; the launcher manifest and URI.
+  backup, refused while UEFN runs, `dry_run`.
+- `win_procs.py`: read-only Windows process and window queries through `ctypes` (no package). Its only acting call
+  stops an orphaned crash reporter for `close_crash_reporter`.
+- Recommendation: set **Editor Preferences > Loading & Saving > Load on Startup = Most Recent Project** (also a
+  selector on the HUB screen). UEFN crashes often; with this setting `uefn_launch_project` relaunches UEFN, the project
+  opens without the HUB and the listener autostarts through the hook, so an agent recovers by itself. Without it the
+  user clicks the project on the HUB.
 
-### Added — onboarding
+### Added — `[experimental]` tag (`tool_tags.py`)
+
+- 7 tools that are hard to undo or act outside the open level need the user's confirmation before each call:
+  `execute_python`, `delete_asset`, `asset_batch_rename`, `shutdown`, `verse_push`, `uefn_launch_project`,
+  `uefn_set_load_on_startup`. Their MCP title starts with `[experimental]`, their annotations set
+  `destructiveHint=true`, and their description starts with "[experimental] Ask the user to confirm before each call."
+  The server instructions list them too.
+
+### Added — setup
 
 - `setup.ps1`: idempotent machine setup (`-DryRun`): real Python 3.10+, `requirements.txt`, `UEFN_MCP_PATH`,
   `ensure_mcp_hook.ps1` (+ `-ScheduleHook`), UEFN report (install, "Load on Startup", Python enabled for the project,
-  hook), `-WithTray`, `-WithMss`, `-EnableLoadLastProject` (opt-in), `-RegisterClaude`, and what is left to do.
+  hook), `-WithTray`, `-WithMss`, `-EnableLoadLastProject`, `-RegisterClaude`, `-SkipPip`, and what is left to do.
 - `uefn_session.py` doubles as a CLI (`status`, `find-install`, `set-load-on-startup`) used by `setup.ps1`.
 
 ### Fixed — safety
@@ -67,49 +61,38 @@ Fixed).
   `size` [x, y, z] (default: bounds size).
 - **Static-mesh getters that crash UEFN 42.20.** `staticmesh_get_info`, `staticmesh_enable_nanite`,
   `staticmesh_remove_lods` and `staticmesh_remove_collisions` called `StaticMeshEditorSubsystem` metadata getters
-  (`has_vertex_colors`, `get_lod_count`, `get_number_verts`, `get_nanite_settings`, ...); a probe of those getters
-  killed UEFN 42.20 (EXCEPTION_ACCESS_VIOLATION, 2026-09-30). The tools now read asset-registry tags,
-  `static_materials`, `get_bounding_box()` and the `nanite_settings` property only; `simple_collision_count`,
-  `convex_collision_count`, `has_vertex_colors`, `lod_screen_sizes` and the read-back counts of the two remove tools
-  say "not available safely in UEFN 42.20". `staticmesh_get_info` adds `triangles_lod0`, `materials`,
-  `collision_prims`, `bounds`, `registry` and `read_errors`; `staticmesh_enable_nanite` keeps the mesh's other Nanite
-  settings.
-- **Fortnite client out of the default input allowlist.** Synthetic input into the anti-cheat-protected game client
-  can count as automation under Epic's terms and risks the account. `FortniteClient-Win64-Shipping*` and
-  `FortniteLauncher` are no longer allowed by default, and neither `*` nor a broad glob such as `Fortnite*` reaches them;
-  only an entry that names them does (`UEFN_DESKTOP_ALLOW=+FortniteClient-Win64-Shipping`, the owner's opt-in), which
-  `desktop_list_windows` reports under `allowlist_warnings` and the audit log marks as `protected_target`. Screenshots
-  and window lists of the client are unchanged; refusals explain the risk and the opt-in.
+  (`has_vertex_colors`, `get_lod_count`, `get_number_verts`, `get_nanite_settings`, ...), which crash UEFN 42.20
+  (EXCEPTION_ACCESS_VIOLATION). The tools now read asset-registry tags, `static_materials`, `get_bounding_box()` and
+  the `nanite_settings` property only; `simple_collision_count`, `convex_collision_count`, `has_vertex_colors`,
+  `lod_screen_sizes` and the read-back counts of the two remove tools say "not available safely in UEFN 42.20".
+  `staticmesh_get_info` adds `triangles_lod0`, `materials`, `collision_prims`, `bounds`, `registry` and
+  `read_errors`; `staticmesh_enable_nanite` keeps the mesh's other Nanite settings.
 - **Mixed versions.** The listener with these fixes reports protocol 0.3.3. The MCP server reads the version from
   `GET /` and does not send a rotation, `focus_selected` or a `staticmesh_*` command to an older listener (which would
   swap the axes or call the crashing getters): it asks to reload `uefn_listener.py` and sends nothing.
 
+### Removed
+
+- Desktop control (mouse / keyboard input and window tools), which was never released: the server sends no input.
+  `screenshot_desktop` (optional `mss`) is unchanged.
+
 ### Tests and docs
 
-- `tests/test_desktop_control_offline.py` (+ `--live` read-only smoke), `tests/test_uefn_session_offline.py`,
-  `tests/test_desktop_input_live.py` (opt-in, sandbox window only); `tests/test_mcp_server_offline.py` expects 121
-  tools including every new one and named-axes rotation schemas.
+- `tests/test_uefn_session_offline.py`; `tests/test_mcp_server_offline.py` expects 110 tools, named-axes rotation
+  schemas and exactly the 7 `[experimental]` tools tagged.
 - Safety fixes: `tests/test_rotation_offline.py` (AST scan for keyword-built rotators, `_parse_rotation`, the rotation
   handlers against a fake `unreal` with the real `Rotator` signature, server schemas and the listener-version guard),
   `tests/test_staticmesh_safety_offline.py` (AST scan: no crash-list getter anywhere in the listener; the
-  `staticmesh_*` handlers against a fake `unreal` whose crashing getters raise), the Fortnite opt-in cases in
-  `tests/test_desktop_control_offline.py`; helper `tests/_listener_ast.py` compiles listener functions without
-  `unreal`. `tests/test_safety_fixes_live.py` is written but has not run (see below).
-- `docs/desktop_control.md` (rails, coordinates, UEFN facts, recipes, pending live tests); README, `docs/setup.md`,
-  `docs/tools_reference.md` ("Conventions (0.5.0)": rotations, crash-safe static-mesh reads), `docs/architecture.md`,
-  `docs/troubleshooting.md`, `docs/uefn_python_capabilities.md` updated.
-
-### Pending live verification
-
-The HUB flow, `LastProjectFileName` retargeting, closing a real crash dialog and the input path were not exercised
-against UEFN (another agent was driving the editor); see `docs/desktop_control.md`, "Pending live tests". The safety
-fixes were verified offline only: `python tests/test_safety_fixes_live.py --yes-touch-editor [--camera]` (scratch
-level, spawns and deletes a test cube, never saves) checks the rotation axes, `focus_selected`, the ambiguous-list
-refusal and the static-mesh reads in UEFN; `staticmesh_generate_uv` with the new gizmo arguments is untested in UEFN.
+  `staticmesh_*` handlers against a fake `unreal` whose crashing getters raise); helper `tests/_listener_ast.py`
+  compiles listener functions without `unreal`. `tests/test_safety_fixes_live.py --yes-touch-editor [--camera]`
+  (scratch level, spawns and deletes a test cube, never saves) checks the rotation axes, `focus_selected`, the
+  ambiguous-list refusal and the static-mesh reads in UEFN.
+- README, `docs/setup.md`, `docs/tools_reference.md` ("Conventions (0.5.0)": rotations, crash-safe static-mesh reads),
+  `docs/architecture.md`, `docs/troubleshooting.md`, `docs/uefn_python_capabilities.md` updated.
 
 ## 0.4.0 — 2026-09-30
 
-The EndoWorlds fork merged into the base repo. Compared with 0.2.0 (`3f65857`): 107 MCP tools instead of 28
+A community fork merged into the base repo. Compared with 0.2.0 (`3f65857`): 107 MCP tools instead of 28
 (79 new), a Verse module that works without the editor listener, listener autostart, a tray icon and a more robust
 listener. Listener protocol 0.3.2 (was 0.2.0).
 
