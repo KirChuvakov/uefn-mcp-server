@@ -4054,7 +4054,10 @@ try:
 
     # NEVER touch the old tkinter window — two tk.Tk() crashes tcl.
     # If the old window is still alive, start_listener will reuse it.
-    start_listener()
+    # With the tray icon the window starts hidden (the icon re-opens it); without
+    # the icon it opens, or nothing would show that the listener runs.
+    # UEFN_MCP_SHOW_WINDOW=1 opens it anyway.
+    start_listener(show_status=(not _TRAY_AVAILABLE) or os.environ.get("UEFN_MCP_SHOW_WINDOW") == "1")
 except Exception as _e:
     unreal.log_error(f"[MCP] Failed to start listener: {_e}")
     import traceback
