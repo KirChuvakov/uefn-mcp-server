@@ -1,0 +1,38 @@
+# Landscape tools (0.6.0, listener protocol 0.4.0)
+
+UEFN's Python API has no call that creates landscape components (no `LandscapeEditorSubsystem`, no
+create / add-component function; checked against the full generated stub). These tools work around it:
+
+| Tool | Listener command | What it does |
+|---|---|---|
+| `landscape_info` | `landscape_info` | Landscape + proxies, component counts, material, the vertex grid (origin, min_xy, scale, quads, vertices) |
+| `landscape_set_material` | `landscape_set_material` | Sets `landscape_material` on the Landscape actor, saves the packages |
+| `landscape_export_heights` | `landscape_export_heights` | Whole landscape -> 16-bit grayscale PNG on the host, min / max in cm |
+| `landscape_set_heights` [experimental] | `landscape_import_heights` | Shapes (flat, plateau, rect, hill, ring, noise) or a PNG -> RG PNG -> texture -> material -> RGBA8 render target -> `landscape_import_heightmap_from_render_target` (edit layer 0); reads back min / max |
+| `landscape_export_t3d` | `landscape_export_t3d` | Landscape actors -> T3D file (LevelExporterT3D, selected only): a template |
+| `landscape_paste_t3d` [experimental] | `landscape_paste` | Clipboard filled from outside UEFN, `EDIT PASTE` with the world context, new actors moved by `offset`, clipboard restored |
+
+Heights: uint16, 32768 = the landscape actor's Z, one unit = scale.z / 128 cm. The listener moves them through
+RGBA8 render targets packed R = high byte, G = low byte. Helper assets live in `/<mount>/_LandscapeTools/`
+(`T_LandscapeHeights`, re-imported each call; `M_LandscapeHeightWriter`, unlit, emissive = the texture).
+
+## Not verified on a live editor yet
+
+Written with UEFN closed. Assumptions to check, in this order:
+
+1. `landscape_info` on a level with a landscape: the grid's `vertices` must equal components x
+   component_size_quads + 1 per axis (4x4 components of 63 quads -> 253 x 253).
+2. `landscape_export_heights` on a flat landscape: min = max = 32768 (R = 128, G = 0). Another value means the
+   RGBA8 packing is not R-high / G-low; fix `(c.r << 8) | c.g` in the listener and `write_rg_png` together.
+3. `landscape_set_heights` with `[{"type": "plateau", "x": 0, "y": 0, "radius": 4000, "height_m": 1, "falloff": 1500}]`:
+   `match` true, the plateau visible on a render at the landscape centre and not mirrored (X along texture
+   columns, Y along rows). Then `[{"type": "flat", "height_m": 0}]` puts it back.
+   - If the texture import is not exact (sRGB, compression, filtering), `readback` drifts by a few units: check
+     `T_LandscapeHeights` settings (VectorDisplacementmap, sRGB off, nearest, no mips, NPOT kept).
+   - World Partition: the import runs on the Landscape actor with all proxies; check every proxy changed.
+4. The heights reach disk: reopen the level, export again, compare.
+5. `landscape_export_t3d` of the 4x4 landscape: does the file hold `LandscapeHeightData` per component? Then
+   `landscape_paste_t3d` with an offset outside the existing landscape, in a scratch level or after a save:
+   a new landscape with components and the same heights, or a refusal. Record what UEFN does with the
+   landscape GUID and edit layers. If the paste works, this is how a new landscape is made without Landscape
+   Mode; if not, Landscape Mode stays the only route and the paste tool should be removed.
