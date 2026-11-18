@@ -116,6 +116,17 @@ def register(mcp, send: Callable[..., dict]) -> None:
         r["match"] = (r.get("readback_min"), r.get("readback_max")) == (r["sent_min"], r["sent_max"])
         return json.dumps(r, indent=2)
 
+    @mcp.tool(**experimental("Overwrite landscape paint layers"))
+    def landscape_set_weights(layers: dict[str, str], label: str = "", save: bool = True) -> str:
+        """[experimental] Ask the user to confirm before each call. Overwrite paint-layer weights:
+        {layer name: 8-bit grayscale PNG sized to the vertex grid (landscape_info grid.vertices), 0..255 = weight}.
+        Give every layer that should change, with weights that sum to 1 per pixel (weight-blended layers).
+        The layers need LayerInfo assets (Landscape Mode > Paint > Target Layers); a layer without one is
+        reported, not written. landscape_heights.write_gray8_png writes the PNGs.
+        """
+        return json.dumps(call("landscape_import_weights", {"layers": layers, "label": label, "save": save},
+                               timeout=600.0), indent=2)
+
     @mcp.tool()
     def landscape_export_t3d(out_path: str, labels: list[str] | None = None) -> str:
         """Export landscape actors (all, or by label) to a T3D file: a template a later landscape_paste_t3d

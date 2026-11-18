@@ -2726,6 +2726,74 @@ def _cmd_landscape_import_heights(png_path: str, label: str = "", edit_layer_ind
             "readback_min": min(vals) if vals else None, "readback_max": max(vals) if vals else None}
 
 
+def _weight_writer_material(texture):
+    """M_LandscapeWeightWriter: unlit, emissive = the grayscale weights texture (0..1)."""
+    root = _project_mount() + "/" + _LANDSCAPE_TOOLS_DIR
+    path = root + "/M_LandscapeWeightWriter"
+    if unreal.EditorAssetLibrary.does_asset_exist(path):
+        return unreal.EditorAssetLibrary.load_asset(path)
+    at = unreal.AssetToolsHelpers.get_asset_tools()
+    mat = at.create_asset("M_LandscapeWeightWriter", root, unreal.Material, unreal.MaterialFactoryNew())
+    mat.set_editor_property("shading_model", unreal.MaterialShadingModel.MSM_UNLIT)
+    mel = unreal.MaterialEditingLibrary
+    ts = mel.create_material_expression(mat, unreal.MaterialExpressionTextureSample, -400, 0)
+    ts.set_editor_property("texture", texture)
+    ts.set_editor_property("sampler_type", unreal.MaterialSamplerType.SAMPLERTYPE_LINEAR_COLOR)
+    mel.connect_material_property(ts, "R", unreal.MaterialProperty.MP_EMISSIVE_COLOR)
+    mel.recompile_material(mat)
+    unreal.EditorAssetLibrary.save_asset(path)
+    return mat
+
+
+@_register("landscape_import_weights")
+def _cmd_landscape_import_weights(layers: Dict[str, str], label: str = "", edit_layer_index: int = 0,
+                                  save: bool = True) -> dict:
+    """Write paint-layer weights: {layer name: path of an 8-bit grayscale PNG sized to the vertex grid}.
+
+    Every PNG goes PNG -> texture (uncompressed, linear, nearest, no mips) -> unlit material -> RGBA32F
+    render target -> landscape_import_weightmap_from_render_target. The layers need LayerInfo assets
+    (Landscape Mode > Paint > Target Layers); a layer without one makes the engine return False.
+    """
+    world = unreal.EditorLevelLibrary.get_editor_world()
+    land = _main_landscape(label)
+    grid = _landscape_grid(land)
+    w, h = grid["vertices"]
+    known = [str(n) for n in land.get_target_layer_names()]
+    root = _project_mount() + "/" + _LANDSCAPE_TOOLS_DIR
+    results = {}
+    land.modify(True)
+    for layer, png in layers.items():
+        if layer not in known:
+            results[layer] = f"no LayerInfo for this layer (known: {known})"
+            continue
+        task = unreal.AssetImportTask()
+        task.filename = png
+        task.destination_path = root
+        task.destination_name = "T_LandscapeWeights"
+        task.automated = True
+        task.save = False
+        task.replace_existing = True
+        unreal.AssetToolsHelpers.get_asset_tools().import_asset_tasks([task])
+        tex = unreal.EditorAssetLibrary.load_asset(root + "/T_LandscapeWeights")
+        tex.set_editor_property("power_of_two_mode", unreal.TexturePowerOfTwoSetting.NONE)
+        tex.set_editor_property("compression_settings", unreal.TextureCompressionSettings.TC_VECTOR_DISPLACEMENTMAP)
+        tex.set_editor_property("srgb", False)
+        tex.set_editor_property("filter", unreal.TextureFilter.TF_NEAREST)
+        tex.set_editor_property("mip_gen_settings", unreal.TextureMipGenSettings.TMGS_NO_MIPMAPS)
+        tex.set_editor_property("never_stream", True)
+        unreal.EditorAssetLibrary.save_asset(root + "/T_LandscapeWeights", False)
+        if (tex.blueprint_get_size_x(), tex.blueprint_get_size_y()) != (w, h):
+            results[layer] = f"PNG must be {w}x{h}"
+            continue
+        mat = _weight_writer_material(tex)
+        rt = unreal.RenderingLibrary.create_render_target2d(
+            world, w, h, unreal.TextureRenderTargetFormat.RTF_RGBA32F, unreal.LinearColor(0, 0, 0, 1))
+        unreal.RenderingLibrary.draw_material_to_render_target(world, rt, mat)
+        results[layer] = bool(land.landscape_import_weightmap_from_render_target(rt, unreal.Name(layer), edit_layer_index))
+    saved = _save_landscape_packages() if save else 0
+    return {"layers": results, "saved_packages": saved}
+
+
 @_register("landscape_export_t3d")
 def _cmd_landscape_export_t3d(out_path: str, labels: List[str] = None) -> dict:
     """Export landscape actors (all, or the given labels) to a T3D file with LevelExporterT3D (selected only)."""

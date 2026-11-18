@@ -19,7 +19,7 @@ import threading
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # 107 in 0.4.0 + 3 uefn_* session tools (0.5.0) + 6 landscape tools (0.6.0).
-MIN_TOOLS = 116
+MIN_TOOLS = 117
 SESSION_TOOLS = {"uefn_status", "uefn_launch_project", "uefn_set_load_on_startup"}
 # One tool per group (all of the new groups), so a module that fails to register is caught by name.
 EXPECTED = {
@@ -34,7 +34,8 @@ EXPECTED = {
 # Tools that need the user's confirmation: "[experimental]" title, destructiveHint, note first in the description.
 EXPERIMENTAL_TOOLS = {"execute_python", "delete_asset", "asset_batch_rename", "shutdown", "verse_push",
                       "uefn_launch_project", "uefn_set_load_on_startup",
-                      "landscape_set_heights", "landscape_paste_t3d"}
+                      "landscape_set_heights", "landscape_paste_t3d",
+                      "landscape_set_weights"}
 EXPERIMENTAL_NOTE = "[experimental] Ask the user to confirm before each call."
 # Tools whose rotation parameter must be published as named axes (0.5.0 rotation fix).
 ROTATION_PARAMS = {"spawn_actor": "rotation", "set_actor_transform": "rotation", "set_viewport_camera": "rotation",

@@ -159,6 +159,18 @@ def write_rg_png(path: str, width: int, height: int, values: Sequence[int]) -> N
                 + _png_chunk(b"IDAT", zlib.compress(bytes(raw), 9)) + _png_chunk(b"IEND", b""))
 
 
+def write_gray8_png(path: str, width: int, height: int, values: Sequence[float]) -> None:
+    """8-bit grayscale PNG from 0..1 floats (paint-layer weights)."""
+    raw = bytearray()
+    for j in range(height):
+        raw.append(0)
+        raw += bytes(max(0, min(255, int(round(v * 255)))) for v in values[j * width:(j + 1) * width])
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 0, 0, 0, 0)
+    with open(path, "wb") as f:
+        f.write(b"\x89PNG\r\n\x1a\n" + _png_chunk(b"IHDR", ihdr)
+                + _png_chunk(b"IDAT", zlib.compress(bytes(raw), 9)) + _png_chunk(b"IEND", b""))
+
+
 def write_gray16_png(path: str, width: int, height: int, values: Sequence[int]) -> None:
     """16-bit grayscale PNG (what terrain tools read)."""
     raw = bytearray()
