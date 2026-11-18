@@ -2499,9 +2499,12 @@ def _cmd_mesh_scatter(
 # read a landscape, write its heights through a render target, set its
 # material, and move landscape actors in and out through T3D (export to a
 # file; paste from the clipboard, which the MCP server fills from outside
-# UEFN). Heights travel as uint16 (32768 = the landscape actor's Z) packed
-# R = high byte, G = low byte in RGBA8, the packing the engine uses for
-# RTF_RGBA8 render targets.
+# UEFN). Heights travel as uint16 (32768 = the landscape actor's Z). Verified
+# on UEFN 2026-11-18: with an RTF_RGBA32F render target and the RG flag OFF the
+# engine puts the raw uint16 height in R (export and import); with the flag ON
+# it packs R = high byte / G = low byte as 0..1 values. The PNG handed over by
+# the MCP server is RG-packed 8-bit; M_LandscapeHeightWriter decodes it to the
+# raw value (R*65280 + G*255) for the float target.
 
 _LANDSCAPE_CLASSES = ("Landscape", "LandscapeStreamingProxy", "LandscapeProxy")
 _LANDSCAPE_TOOLS_DIR = "_LandscapeTools"
@@ -2531,21 +2534,25 @@ def _main_landscape(label: str = ""):
 def _landscape_grid(landscape) -> dict:
     """Vertex grid of the whole landscape: origin, scale, quads, vertex counts."""
     comps = []
+    xs, ys = [], []
     for a in _landscape_actors():
-        comps += list(a.get_components_by_class(unreal.LandscapeComponent))
+        cs = list(a.get_components_by_class(unreal.LandscapeComponent))
+        if not cs:
+            continue
+        comps += cs
+        # LandscapeComponent has no reflected bounds in UEFN: use the owning actor's bounds.
+        o, e = a.get_actor_bounds(False)
+        xs += [o.x - e.x, o.x + e.x]
+        ys += [o.y - e.y, o.y + e.y]
     if not comps:
         raise ValueError("The landscape has no LandscapeComponent: it is an empty shell (make one in Landscape Mode)")
     t = landscape.get_actor_transform()
     loc, scale = t.translation, t.scale3d
     try:
-        csq = int(comps[0].get_editor_property("component_size_quads"))
+        bases = sorted(set(int(c.get_editor_property("section_base_x")) for c in comps))
+        csq = bases[1] - bases[0] if len(bases) > 1 else 0
     except Exception:
         csq = 0
-    xs, ys = [], []
-    for c in comps:
-        o, e = c.bounds.origin, c.bounds.box_extent
-        xs += [o.x - e.x, o.x + e.x]
-        ys += [o.y - e.y, o.y + e.y]
     quads_x = int(round((max(xs) - min(xs)) / scale.x))
     quads_y = int(round((max(ys) - min(ys)) / scale.y))
     return {
@@ -2610,7 +2617,17 @@ def _cmd_landscape_set_material(material_path: str, label: str = "", save: bool 
 
 def _height_rt(world, w: int, h: int):
     return unreal.RenderingLibrary.create_render_target2d(
-        world, w, h, unreal.TextureRenderTargetFormat.RTF_RGBA8, unreal.LinearColor(0.5, 0.0, 0.0, 1.0))
+        world, w, h, unreal.TextureRenderTargetFormat.RTF_RGBA32F, unreal.LinearColor(32768.0, 0.0, 0.0, 1.0))
+
+
+def _read_heights(world, land, w: int, h: int) -> List[int]:
+    rt = _height_rt(world, w, h)
+    if not land.landscape_export_heightmap_to_render_target(rt, False, True):
+        raise RuntimeError("landscape_export_heightmap_to_render_target returned False")
+    px = unreal.RenderingLibrary.read_render_target_raw(world, rt, False)
+    if px is None or len(px) != w * h:
+        raise RuntimeError(f"Render target read gave {0 if px is None else len(px)} pixels, expected {w * h}")
+    return [max(0, min(65535, int(round(c.r)))) for c in px]
 
 
 @_register("landscape_export_heights")
@@ -2622,20 +2639,13 @@ def _cmd_landscape_export_heights(label: str = "") -> dict:
     land = _main_landscape(label)
     grid = _landscape_grid(land)
     w, h = grid["vertices"]
-    rt = _height_rt(world, w, h)
-    ok = land.landscape_export_heightmap_to_render_target(rt, False, True)
-    if not ok:
-        raise RuntimeError("landscape_export_heightmap_to_render_target returned False")
-    px = unreal.RenderingLibrary.read_render_target(world, rt, False)
-    if px is None or len(px) != w * h:
-        raise RuntimeError(f"Render target read gave {0 if px is None else len(px)} pixels, expected {w * h}")
-    vals = [(c.r << 8) | c.g for c in px]
+    vals = _read_heights(world, land, w, h)
     return {"grid": grid, "width": w, "height": h, "min": min(vals), "max": max(vals),
             "data_b64": base64.b64encode(struct.pack(f"<{len(vals)}H", *vals)).decode()}
 
 
 def _height_writer_material(texture):
-    """M_LandscapeHeightWriter: unlit, emissive = the heights texture (sampled as linear colour)."""
+    """M_LandscapeHeightWriter: unlit, emissive R = raw height decoded from the RG texture (R*65280 + G*255)."""
     root = _project_mount() + "/" + _LANDSCAPE_TOOLS_DIR
     path = root + "/M_LandscapeHeightWriter"
     if unreal.EditorAssetLibrary.does_asset_exist(path):
@@ -2647,7 +2657,12 @@ def _height_writer_material(texture):
     ts = mel.create_material_expression(mat, unreal.MaterialExpressionTextureSample, -400, 0)
     ts.set_editor_property("texture", texture)
     ts.set_editor_property("sampler_type", unreal.MaterialSamplerType.SAMPLERTYPE_LINEAR_COLOR)
-    mel.connect_material_property(ts, "RGB", unreal.MaterialProperty.MP_EMISSIVE_COLOR)
+    k = mel.create_material_expression(mat, unreal.MaterialExpressionConstant3Vector, -400, 250)
+    k.set_editor_property("constant", unreal.LinearColor(65280.0, 255.0, 0.0, 0.0))
+    dot = mel.create_material_expression(mat, unreal.MaterialExpressionDotProduct, -150, 100)
+    mel.connect_material_expressions(ts, "RGB", dot, "A")
+    mel.connect_material_expressions(k, "", dot, "B")
+    mel.connect_material_property(dot, "", unreal.MaterialProperty.MP_EMISSIVE_COLOR)
     mel.recompile_material(mat)
     unreal.EditorAssetLibrary.save_asset(path)
     return mat
@@ -2706,10 +2721,7 @@ def _cmd_landscape_import_heights(png_path: str, label: str = "", edit_layer_ind
         raise RuntimeError("landscape_import_heightmap_from_render_target returned False")
     saved = _save_landscape_packages() if save else 0
 
-    back = _height_rt(world, w, h)
-    land.landscape_export_heightmap_to_render_target(back, False, True)
-    px = unreal.RenderingLibrary.read_render_target(world, back, False)
-    vals = [(c.r << 8) | c.g for c in px] if px else []
+    vals = _read_heights(world, land, w, h)
     return {"grid": grid, "imported": True, "saved_packages": saved,
             "readback_min": min(vals) if vals else None, "readback_max": max(vals) if vals else None}
 
