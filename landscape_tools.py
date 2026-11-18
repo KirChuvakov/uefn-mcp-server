@@ -1,9 +1,8 @@
 """Landscape tools (0.6.0): read, sculpt by shapes or PNG, set the material, export / paste through T3D.
 
-UEFN has no Python call that creates landscape components, so a new landscape comes from a T3D paste
-(`landscape_export_t3d` of an existing landscape once, then `landscape_paste_t3d` wherever it is
-needed) or from Landscape Mode by hand. Heights go through the listener as an RG PNG
-(landscape_heights.py). See docs/landscape.md. Untested on a live editor at the time of writing.
+UEFN has no Python call that creates landscape components, so a new landscape comes from Landscape Mode by hand;
+a T3D paste (`landscape_export_t3d` once, then `landscape_paste_t3d`) may also work but has not run on a live
+editor yet. Heights go through the listener as an RG PNG (landscape_heights.py). See docs/landscape.md.
 """
 
 import base64

@@ -1,6 +1,6 @@
 # Tools Reference
 
-110 tools in 0.5.0 (107 in 0.4.0). The tools up to v0.3.1 have full pages below; the 0.4.0 additions are summarized in [New in v0.4.0](#new-in-v040-summary) and the 0.5.0 UEFN session tools in [New in v0.5.0](#new-in-v050-uefn-session) (each tool's docstring, which Claude Code shows, documents every parameter). Listener tools map 1:1 to a listener command; the Verse build and navigation tools talk to UEFN directly; the session tools run in the MCP server process.
+117 tools in 0.6.0 (110 in 0.5.0, 107 in 0.4.0). The tools up to v0.3.1 have full pages below; the 0.4.0 additions are summarized in [New in v0.4.0](#new-in-v040-summary) and the 0.5.0 UEFN session tools in [New in v0.5.0](#new-in-v050-uefn-session) (each tool's docstring, which Claude Code shows, documents every parameter). Listener tools map 1:1 to a listener command; the Verse build and navigation tools talk to UEFN directly; the session tools run in the MCP server process.
 
 ## Conventions (0.5.0)
 

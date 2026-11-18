@@ -3,26 +3,35 @@
 Release versions of the repo. The listener also reports a protocol version in `ping` (`PROTOCOL_VERSION` in
 `uefn_listener.py`); it changes only when the listener/server wire format changes.
 
-## Unreleased
+## 0.6.0 — 2026-11-19
+
+117 MCP tools. Listener protocol 0.4.0 (was 0.3.3): new landscape commands; the landscape tools refuse an older listener.
+
+### Added — landscape (`landscape_tools.py`, `landscape_heights.py`, 7 tools)
+- `landscape_info`, `landscape_set_material`, `landscape_export_heights` (16-bit PNG on the host).
+- `landscape_set_heights` [experimental]: shapes (flat, plateau, rect, hill, ring, noise, mountain) or a heightmap
+  PNG, written through an RGBA32F render target.
+- `landscape_set_weights` [experimental]: paint layers from 8-bit grayscale PNGs; `examples/landscape_paint_apollo.py`
+  is a worked example.
+- `landscape_export_t3d` and `landscape_paste_t3d` [experimental]: a landscape template out to a T3D file and
+  back in with `EDIT PASTE`, the clipboard filled from outside UEFN and restored.
+- `docs/landscape.md`: how it works and what was checked. Heights, paint layers and the material ran on a live
+  editor; the T3D export and paste have not yet.
+
+### Added — other
+- `tools/generate_api_docs.py`: Markdown API docs from the `.pyi` stub of `tools/generate_uefn_stub.py`.
+- Cursor setup in the README.
+
+### Changed
+- The listener's status window starts hidden when the tray icon is available (`UEFN_MCP_SHOW_WINDOW=1` opens it).
 
 ### Fixed
-
+- `get_editor_log` reads the editor log. It took the newest `.log` in the folder, usually `Lore.log` or the
+  revision-control log; `filter_str` now applies before `last_n`.
 - `requirements.txt` pins `mcp>=1.26,<2`: on a fresh PC pip picked the mcp 2.x SDK and the server, written for 1.x,
   did not start. `setup.ps1` (and `pip install -r requirements.txt`) now installs a 1.x SDK, and moves a PC that
   already got 2.x back to 1.x.
-
-## 0.6.0 — unreleased (not tested on a live editor yet)
-
-116 MCP tools. Listener protocol 0.4.0 (was 0.3.3): new landscape commands; the landscape tools refuse an older listener.
-
-### Added — landscape (`landscape_tools.py`, `landscape_heights.py`, 6 tools)
-- `landscape_info`, `landscape_set_material`, `landscape_export_heights` (16-bit PNG on the host).
-- `landscape_set_heights` [experimental]: shapes (flat, plateau, rect, hill, ring, noise) or a heightmap PNG,
-  written through an RGBA8 render target.
-- `landscape_export_t3d` and `landscape_paste_t3d` [experimental]: a landscape template out to a T3D file and
-  back in with `EDIT PASTE`, the clipboard filled from outside UEFN and restored.
-- `docs/landscape.md`: how it works and the live checks still to run. Offline tests:
-  `tests/test_landscape_heights_offline.py`.
+- Install docs say where **Project Settings** is and when **Execute Python Script** appears.
 
 ## 0.5.0 — 2026-10-02
 

@@ -215,14 +215,20 @@ Two more modules run inside the MCP server process and need neither the listener
   only acting call terminates an orphaned crash reporter, used by `uefn_launch_project(close_crash_reporter=True)` when
   no editor process runs.
 
+## Component 5: Landscape (0.6.0)
+
+`landscape_tools.py` adds 7 tools to the MCP server. `landscape_heights.py` builds heights and reads and writes PNGs
+with no dependencies; the listener's `landscape_*` handlers write them through render targets. `landscape_paste_t3d`
+fills the Windows clipboard from the server process, because UEFN's Python cannot. See [landscape.md](landscape.md).
+
 ## Experimental tag (0.5.0)
 
 `tool_tags.py` defines the `[experimental]` tag for tools that are hard to undo or act outside the open level
 (`execute_python`, `delete_asset`, `asset_batch_rename`, `shutdown`, `verse_push`, `uefn_launch_project`,
-`uefn_set_load_on_startup`). `experimental(title)` returns the keyword arguments for `@mcp.tool(...)`: a title that
+`uefn_set_load_on_startup`, `landscape_set_heights`, `landscape_set_weights`, `landscape_paste_t3d`). `experimental(title)` returns the keyword arguments for `@mcp.tool(...)`: a title that
 starts with `[experimental]` and `ToolAnnotations(destructiveHint=True)`; each tagged tool's docstring starts with
 "[experimental] Ask the user to confirm before each call." The server instructions list the same tools, and
-`tests/test_mcp_server_offline.py` checks that exactly these seven carry the tag.
+`tests/test_mcp_server_offline.py` checks that exactly these ten carry the tag.
 
 ## Autostart (0.4.0)
 

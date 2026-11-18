@@ -1,8 +1,8 @@
 """Landscape heights on the host side: shapes -> uint16 grid -> PNG, and back. No dependencies.
 
 A landscape vertex height is a uint16: 32768 is the landscape actor's Z, one unit is scale.z / 128 cm
-(0.78 cm at the usual scale 100). The listener moves heights through RGBA8 render targets packed
-R = high byte, G = low byte, so the PNG handed to it is 8-bit RGB with that packing ("RG PNG").
+(0.78 cm at the usual scale 100). The PNG handed to the listener is 8-bit RGB packed
+R = high byte, G = low byte ("RG PNG"); the listener decodes it into an RGBA32F render target.
 A 16-bit grayscale PNG (World Machine, Gaea, ...) is read and converted.
 """
 

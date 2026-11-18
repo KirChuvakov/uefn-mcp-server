@@ -41,7 +41,7 @@ machine-specific path. Restart terminals and Claude Code afterwards so they see 
 ## Step 2: Enable Python in UEFN
 
 1. Open your project in UEFN
-2. Go to **Project > Project Settings**
+2. Open the **Project** dropdown in the editor toolbar and choose **Project Settings...**
 3. Search for **Python** and check the box for **Python Editor Script Plugin**
 
 After this, you should see **Tools > Execute Python Script** in the menu bar. The setting is stored per project and

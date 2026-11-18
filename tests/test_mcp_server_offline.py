@@ -18,7 +18,7 @@ import sys
 import threading
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-# 107 in 0.4.0 + 3 uefn_* session tools (0.5.0) + 6 landscape tools (0.6.0).
+# 107 in 0.4.0 + 3 uefn_* session tools (0.5.0) + 7 landscape tools (0.6.0).
 MIN_TOOLS = 117
 SESSION_TOOLS = {"uefn_status", "uefn_launch_project", "uefn_set_load_on_startup"}
 # One tool per group (all of the new groups), so a module that fails to register is caught by name.
@@ -88,7 +88,7 @@ def _check() -> dict:
     names = set(out["tools"])
     assert out["init"]["serverInfo"]["name"] == "uefn-mcp"
     instructions = out["init"].get("instructions") or ""
-    assert "v0.5.0" in instructions and "uefn_launch_project" in instructions and "Most Recent Project" in instructions
+    assert "v0.6.0" in instructions and "uefn_launch_project" in instructions and "Most Recent Project" in instructions
     assert '"pitch"' in instructions and "has_vertex_colors" in instructions and "[experimental]" in instructions
     assert "unreleased" not in instructions and "desktop_" not in instructions
     assert len(out["tools"]) == len(names), "duplicate tool names"

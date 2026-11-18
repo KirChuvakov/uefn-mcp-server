@@ -264,8 +264,8 @@ def _device_value_may_be_rotator(value_type: str, value: Any) -> bool:
 mcp = FastMCP(
     "uefn-mcp",
     instructions=(
-        "MCP server for controlling UEFN (Unreal Editor for Fortnite). v0.5.0.\n\n"
-        "Capabilities: actors, assets, levels, viewport, materials, Niagara, "
+        "MCP server for controlling UEFN (Unreal Editor for Fortnite). v0.6.0.\n\n"
+        "Capabilities: actors, assets, levels, viewport, landscapes, materials, Niagara, "
         "animations, static meshes, data tables, asset validation, device @editables, "
         "Play-In-Editor control (playtest_start/stop/status), StaticMeshActor scatter "
         "(mesh_scatter), and Verse source introspection (verse_list_services, "
@@ -289,7 +289,8 @@ mcp = FastMCP(
         "project. Set Editor Preferences > Loading & Saving > Load on Startup to 'Most "
         "Recent Project' so a relaunch after a crash reopens the project by itself.\n\n"
         "Tools titled [experimental] (execute_python, delete_asset, asset_batch_rename, "
-        "shutdown, verse_push, uefn_launch_project, uefn_set_load_on_startup) are hard to "
+        "shutdown, verse_push, uefn_launch_project, uefn_set_load_on_startup, "
+        "landscape_set_heights, landscape_set_weights, landscape_paste_t3d) are hard to "
         "undo or act outside the open level: ask the user to confirm before each call.\n\n"
         "The 'execute_python' tool is the most powerful — it runs arbitrary Python "
         "code inside the editor with full access to the `unreal` module. Use "

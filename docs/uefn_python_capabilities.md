@@ -411,9 +411,5 @@ Python runs **editor-only** (not runtime). For gameplay logic use **Verse**.
 
 | What | Where |
 |------|-------|
-| Full generated API | `docs/generated/README.md` (1,470 files) |
-| UEFN stub for IDE | `docs/uefn_stub.pyi` (2.2M lines) |
-| Module map overview | `docs/00_module_map.md` |
-| Practical examples | `docs/16_practical_examples.md` |
-| Tips & patterns | `docs/17_python_tips_and_patterns.md` |
-| UEFN availability | `docs/uefn_api_availability.md` |
+| UEFN stub for IDE | `docs/uefn_stub.pyi` (2.2M lines; generate with `tools/generate_uefn_stub.py`, not in the repo) |
+| Generated API docs | `docs/generated/README.md`, an index plus one file per domain (generate with `tools/generate_api_docs.py`, not in the repo) |

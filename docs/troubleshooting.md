@@ -15,6 +15,12 @@
 `verse_compile`, `verse_status`, `verse_push` and the Verse navigation tools do not need the listener; they keep
 working while it is down.
 
+### **Project Settings** or **Tools > Execute Python Script** is missing
+
+**Project Settings** is in the **Project** dropdown of the editor toolbar, not in the menu bar. **Execute Python
+Script** appears in the **Tools** menu only after **Python Editor Script Plugin** is enabled there for this project.
+`setup.ps1` reports whether Python is on for your project.
+
 ### No `[MCP] Auto-started` after a project opens
 
 **Cause:** one of the two autostart gates is closed.

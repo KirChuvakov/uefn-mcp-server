@@ -2513,7 +2513,7 @@ def _cmd_mesh_scatter(
 
 
 # ---------------------------------------------------------------------------
-# Landscape (0.6.0, untested live: see docs/landscape.md)
+# Landscape (0.6.0, see docs/landscape.md)
 # ---------------------------------------------------------------------------
 # UEFN has no Python call that creates landscape components. These handlers
 # read a landscape, write its heights through a render target, set its
@@ -2698,7 +2698,7 @@ def _project_mount() -> str:
 def _cmd_landscape_import_heights(png_path: str, label: str = "", edit_layer_index: int = 0, save: bool = True) -> dict:
     """Write heights from an RG-packed 8-bit RGB PNG (R = high byte, G = low byte) sized to the vertex grid.
 
-    PNG -> texture (uncompressed, linear, nearest, no mips) -> unlit material drawn to an RGBA8 render
+    PNG -> texture (uncompressed, linear, nearest, no mips) -> unlit material drawn to an RGBA32F render
     target -> landscape_import_heightmap_from_render_target. Reads the heights back and reports the
     mismatch against the PNG's own min / max, so a wrong packing shows at once.
     """

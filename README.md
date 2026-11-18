@@ -22,8 +22,11 @@ Claude Code  <--stdio-->  MCP Server (mcp_server.py)  <--HTTP 127.0.0.1:8765--> 
   `landscape_export_heights`, `landscape_set_heights` (shapes: flat, plateau, rect, hill, ring, noise, ridged
   mountain; or a heightmap PNG), `landscape_set_weights` (paint layers from grayscale PNGs), `landscape_set_material`,
   `landscape_export_t3d` / `landscape_paste_t3d`. UEFN has no Python call that creates landscape components: make the
-  landscape in Landscape Mode once, then sculpt and paint it from here. Verified live on a World Partition landscape;
+  landscape in Landscape Mode once, then sculpt and paint it from here. Heights and paint layers ran on a live World Partition
+  landscape; the T3D export and paste have not yet;
   see [docs/landscape.md](docs/landscape.md) and the paint example `examples/landscape_paint_apollo.py`.
+- **Also:** the status window starts hidden in the tray, `get_editor_log` reads the editor log instead of the newest
+  file, `tools/generate_api_docs.py` turns the stub into Markdown, and the README covers [Cursor](#using-with-cursor).
 
 ## What's new in 0.5.0
 
@@ -99,10 +102,11 @@ App execution aliases in Windows settings, or put the full path of a real `pytho
 ### 3. Enable Python in UEFN
 
 1. Open your project in UEFN
-2. Go to **Project > Project Settings**
+2. Open the **Project** dropdown in the editor toolbar and choose **Project Settings...**
 3. Search for **Python** and check the box for **Python Editor Script Plugin**
 
-UEFN keeps this per project and per user (`EnablePythonLocallyPerProject`); every project that should autostart the
+**Tools > Execute Python Script** appears in the menu bar only after this. UEFN keeps the setting per project and per user
+(`EnablePythonLocallyPerProject`); every project that should autostart the
 listener needs it.
 
 ### 4. Start the listener inside UEFN
@@ -277,8 +281,8 @@ result = [a.get_actor_label() for a in actors]
 
 ## Experimental tools
 
-Seven tools do something that is hard to undo or reaches outside the open level: run arbitrary code, delete or rename
-assets, push to a live session, stop the listener, start UEFN or edit its settings. They carry the `[experimental]`
+Ten tools do something that is hard to undo or reaches outside the open level: run arbitrary code, delete or rename
+assets, push to a live session, stop the listener, start UEFN, edit its settings or overwrite a landscape. They carry the `[experimental]`
 tag, and an agent should ask the user to confirm before each call:
 
 | Tool | Why |
@@ -290,6 +294,9 @@ tag, and an agent should ask the user to confirm before each call:
 | `verse_push` | Pushes changes to a live session |
 | `uefn_launch_project` | Starts UEFN; may retarget its last project or stop an orphaned crash reporter |
 | `uefn_set_load_on_startup` | Edits UEFN's settings ini |
+| `landscape_set_heights` | Overwrites the whole landscape's heights |
+| `landscape_set_weights` | Overwrites landscape paint layers |
+| `landscape_paste_t3d` | Pastes landscape actors into the level through the clipboard |
 
 The tag shows in three places: the MCP title starts with `[experimental]`, the annotations set `destructiveHint=true`,
 and the description starts with "[experimental] Ask the user to confirm before each call." The server instructions
@@ -329,6 +336,7 @@ The system uses two independently running Python processes, plus two direct chan
 | **Verse build** | `verse_workflow.py` | MCP server process | — | UEFN's VerseWorkflowServer on TCP 1962 |
 | **Verse navigation** | `verse_lsp_service.py` | MCP server process (spawns `verse-lsp.exe`) | — | `epicgames.verse` VS Code extension |
 | **UEFN session** | `uefn_session.py`, `win_procs.py` | MCP server process | — | editor log, settings ini, Epic launcher manifests, ports; read-only Win32 process / window queries through `ctypes` |
+| **Landscape** | `landscape_tools.py`, `landscape_heights.py` | MCP server process | — | listener protocol 0.4.0; Windows PowerShell for the T3D paste's clipboard |
 
 **Why two processes?**
 - All `unreal.*` calls must happen on the editor's main thread (tick callback)
@@ -383,6 +391,8 @@ UEFN exposes a large subset of the Unreal Python API, but a few editor actions h
 | `python tests/test_rotation_offline.py` | host Python with `requirements.txt`; checks the listener source and handlers against a fake `unreal` (named axes, keyword-built rotators) and the server schemas / listener-version guard |
 | `python tests/test_staticmesh_safety_offline.py` | nothing: no crash-list getter anywhere in the listener; `staticmesh_*` handlers against a fake `unreal` whose crashing getters raise |
 | `python tests/test_uefn_session_offline.py` | nothing (temp files only) |
+| `python tests/test_editor_log_offline.py` | nothing: `get_editor_log` against a fake `unreal` and temp logs |
+| `python tests/test_landscape_heights_offline.py` | host Python with `requirements.txt`; the clipboard check also uses Windows PowerShell, never the real clipboard |
 | `python tests/test_safety_fixes_live.py --yes-touch-editor [--camera] [--niagara <system>] [--mesh <mesh>]` | UEFN with a scratch level; spawns and deletes a test cube (never saves), checks the rotation axes and the safe static-mesh reads end to end |
 | `python tests/test_verse_tools_live.py lsp [file.verse]` | `epicgames.verse` extension + a UEFN-generated workspace (UEFN may be closed) |
 | `python tests/test_verse_tools_live.py compile` | UEFN open with the project; triggers a real Verse build |
@@ -399,6 +409,9 @@ Run via **Tools > Execute Python Script** in the UEFN menu bar.
 | [`tools/generate_uefn_stub.py`](tools/generate_uefn_stub.py) | Generate `.pyi` type stub for IDE autocomplete (37K+ types) |
 | [`tests/test_feasibility.py`](tests/test_feasibility.py) | Verify UEFN sandbox supports HTTP/threading for MCP |
 
+[`tools/generate_api_docs.py`](tools/generate_api_docs.py) runs on the host instead: copy the stub to `docs/`, then
+`python tools/generate_api_docs.py --stub docs/uefn_stub.pyi` writes Markdown to `docs/generated/`.
+
 ## Documentation
 
 | Document | Description |
@@ -406,6 +419,7 @@ Run via **Tools > Execute Python Script** in the UEFN menu bar.
 | [Setup Guide](docs/setup.md) | Detailed installation and configuration |
 | [Tools Reference](docs/tools_reference.md) | Every tool: detailed pages for the 0.1-0.3 tools, summary tables for the 0.4.0 and 0.5.0 additions |
 | [Architecture](docs/architecture.md) | How the two-component system works internally |
+| [Landscape](docs/landscape.md) | The landscape tools: formats, what ran live, limits |
 | [Troubleshooting](docs/troubleshooting.md) | Common issues and solutions |
 | [UEFN Python Capabilities](docs/uefn_python_capabilities.md) | Full API capabilities map — 37K types across 30 domains |
 | [Changelog](CHANGELOG.md) | Release history |
