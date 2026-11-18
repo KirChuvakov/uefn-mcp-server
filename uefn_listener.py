@@ -642,9 +642,8 @@ def _cmd_get_editor_log(last_n: int = 100, filter_str: str = "") -> dict:
     revision-control / transport log is rewritten every few seconds and almost
     always wins, returning auth spam instead of the editor output.
 
-    Instead, identify the editor log by name: it is the log whose filename
-    starts with the running application's prefix (e.g.
-    UnrealEditorFortnite.log, from sys.executable), excluding rotated backups.
+    Instead, identify the editor log by name: UnrealEditorFortnite*.log,
+    excluding rotated backups (uefn_session.py finds it the same way).
     If nothing matches the prefix we return an explicit error rather than
     falling back to the newest log — guessing the newest unidentified file is
     exactly the original bug, so this function returns the editor log or
@@ -655,8 +654,7 @@ def _cmd_get_editor_log(last_n: int = 100, filter_str: str = "") -> dict:
     error = None
     try:
         import os
-        # "UnrealEditorFortnite-Win64-Shipping" -> "UnrealEditorFortnite"
-        app_prefix = os.path.splitext(os.path.basename(sys.executable))[0].split("-")[0]
+        app_prefix = "UnrealEditorFortnite"
         matching = [
             f for f in os.listdir(log_dir)
             if f.lower().endswith(".log") and "-backup-" not in f and f.startswith(app_prefix)
