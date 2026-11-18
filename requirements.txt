@@ -1,5 +1,6 @@
 # Host Python (3.10+) that runs mcp_server.py for Claude Code: pip install -r requirements.txt
-mcp>=1.26
+# The server is written for the mcp 1.x SDK; mcp 2.x breaks it (the server does not start), so stay below 2.
+mcp>=1.26,<2
 
 # Optional, host Python: screenshot_desktop needs mss.
 # mss>=10

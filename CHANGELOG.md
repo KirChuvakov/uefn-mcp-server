@@ -3,6 +3,14 @@
 Release versions of the repo. The listener also reports a protocol version in `ping` (`PROTOCOL_VERSION` in
 `uefn_listener.py`); it changes only when the listener/server wire format changes.
 
+## Unreleased
+
+### Fixed
+
+- `requirements.txt` pins `mcp>=1.26,<2`: on a fresh PC pip picked the mcp 2.x SDK and the server, written for 1.x,
+  did not start. `setup.ps1` (and `pip install -r requirements.txt`) now installs a 1.x SDK, and moves a PC that
+  already got 2.x back to 1.x.
+
 ## 0.5.0 — 2026-10-02
 
 110 MCP tools (3 new UEFN session tools, host-side: they run in the MCP server process and need no listener).
