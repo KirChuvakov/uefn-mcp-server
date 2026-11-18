@@ -163,6 +163,31 @@ Ask Claude Code:
 - *"Compile the Verse code and show me the errors"*
 - *"Move the viewport camera to look at the origin"*
 
+## Using with Cursor
+
+The server is a standard stdio MCP server, so [Cursor](https://cursor.com) can use it without code changes; only the
+config file differs from Claude Code.
+
+1. Do steps 1-4 above, or run `setup.ps1`.
+2. Create `.cursor/mcp.json` in your project root, or `~/.cursor/mcp.json` for every project:
+
+   ```json
+   {
+     "mcpServers": {
+       "uefn": {
+         "command": "python",
+         "args": ["C:/path/to/uefn-mcp-server/mcp_server.py"]
+       }
+     }
+   }
+   ```
+
+3. Reload Cursor (Command Palette > **Developer: Reload Window**) and check that `uefn` is listed under
+   **Settings > Tools & MCP**. Tools that go through the listener need it running inside UEFN.
+
+If no tools appear on Windows, see
+[`python` opens the Microsoft Store](docs/troubleshooting.md#windows-python-opens-the-microsoft-store-or-does-nothing).
+
 ## Tray icon
 
 The tray icon needs `pystray` + `Pillow` built for UEFN's embedded Python (3.11), so they go into `./vendor`
@@ -389,7 +414,7 @@ Run via **Tools > Execute Python Script** in the UEFN menu bar.
 
 - UEFN editor with Python enabled for the project (Project Settings)
 - Python 3.10+ on the host system, `pip install -r requirements.txt`
-- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI
+- An MCP client: [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI or [Cursor](https://cursor.com) (see [Using with Cursor](#using-with-cursor))
 - Optional: the `epicgames.verse` VS Code extension (Verse navigation tools), `mss` (`screenshot_desktop`), `pystray` + `Pillow` in `vendor/` (tray icon)
 - UEFN session tools: Windows; nothing to install
 
