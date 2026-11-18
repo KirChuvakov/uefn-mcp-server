@@ -108,7 +108,8 @@ A **status window** will appear showing:
 - **Metrics** — uptime, request count, errors, last command, avg response time
 - **Controls** — Stop / Start / Restart buttons
 
-Closing this window **does not stop the listener** — it just hides it. A **system-tray icon** (optional, see
+With the tray icon installed the window **starts hidden** in the tray (set `UEFN_MCP_SHOW_WINDOW=1` to open it at
+start); without the icon it opens at start. Closing this window **does not stop the listener** — it just hides it. A **system-tray icon** (optional, see
 [Tray icon](#tray-icon)) stays in the notification area while the editor session lives: left-click (or *Show window*)
 re-opens the window; the menu also has *Hide window*, *Restart listener*, *Start/Stop listener* and
 *Quit (stop & remove tray)*.
