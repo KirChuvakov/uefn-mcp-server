@@ -8,7 +8,7 @@ create / add-component function; checked against the full generated stub). These
 | `landscape_info` | `landscape_info` | Landscape + proxies, component counts, material, the vertex grid (origin, min_xy, scale, quads, vertices) |
 | `landscape_set_material` | `landscape_set_material` | Sets `landscape_material` on the Landscape actor, saves the packages |
 | `landscape_export_heights` | `landscape_export_heights` | Whole landscape -> 16-bit grayscale PNG on the host, min / max in cm |
-| `landscape_set_heights` [experimental] | `landscape_import_heights` | Shapes (flat, plateau, rect, hill, ring, noise) or a PNG -> RG PNG -> texture -> material -> RGBA8 render target -> `landscape_import_heightmap_from_render_target` (edit layer 0); reads back min / max |
+| `landscape_set_heights` [experimental] | `landscape_import_heights` | Shapes (flat, plateau, rect, hill, ring, noise) or a PNG -> RG PNG -> texture -> material -> RGBA32F render target -> `landscape_import_heightmap_from_render_target` (edit layer 0); reads back min / max |
 | `landscape_export_t3d` | `landscape_export_t3d` | Landscape actors -> T3D file (LevelExporterT3D, selected only): a template |
 | `landscape_paste_t3d` [experimental] | `landscape_paste` | Clipboard filled from outside UEFN, `EDIT PASTE` with the world context, new actors moved by `offset`, clipboard restored |
 
