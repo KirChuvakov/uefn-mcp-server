@@ -1,5 +1,7 @@
 """Offline tests for landscape_heights.py: shapes, PNG round trips, resampling. No UEFN."""
+import json
 import os
+import shutil
 import sys
 import tempfile
 
@@ -43,6 +45,55 @@ def test_png_round_trips():
 def test_resample():
     vals = [0, 100, 200, 300]
     assert lh.resample(vals, 2, 2, 3, 3) == [0, 50, 100, 100, 150, 200, 200, 250, 300]
+
+
+class _Tools:
+    def __init__(self):
+        self.fns = {}
+
+    def tool(self, **_):
+        def add(fn):
+            self.fns[fn.__name__] = fn
+            return fn
+        return add
+
+
+def test_paste_keeps_a_non_ascii_clipboard():
+    """The real PowerShell calls, with the clipboard replaced by a file: the user's clipboard is not touched."""
+    if not shutil.which("powershell"):
+        return
+    import landscape_tools as lt
+    d = tempfile.mkdtemp()
+    clip, t3d = os.path.join(d, "clip.txt"), os.path.join(d, "land.t3d")
+    original, template = "\u041f\u0440\u0438\u0432\u0435\u0442, caf\u00e9\n", "Begin Map \u00c4\u00d6\nEnd Map\n"
+    for path, text in ((clip, original), (t3d, template)):
+        with open(path, "w", encoding="utf-8", newline="") as f:
+            f.write(text)
+
+    def clipboard():
+        with open(clip, encoding="utf-8", newline="") as f:
+            return f.read()
+
+    seen = {}
+
+    def send(command, params, timeout, min_protocol):
+        seen.update(command=command, clipboard=clipboard())
+        return {"new_actors": []}
+
+    tools = _Tools()
+    lt.register(tools, send)
+    kept = lt._CLIPBOARD_READ, lt._CLIPBOARD_WRITE
+    os.environ["UEFN_TEST_CLIPBOARD"] = clip
+    lt._CLIPBOARD_READ = "[IO.File]::ReadAllText($env:UEFN_TEST_CLIPBOARD, [Text.Encoding]::UTF8)"
+    lt._CLIPBOARD_WRITE = ("[IO.File]::WriteAllText($env:UEFN_TEST_CLIPBOARD, $text, "
+                           "(New-Object Text.UTF8Encoding($false)))")
+    try:
+        assert json.loads(tools.fns["landscape_paste_t3d"](t3d)) == {"new_actors": []}
+    finally:
+        lt._CLIPBOARD_READ, lt._CLIPBOARD_WRITE = kept
+        del os.environ["UEFN_TEST_CLIPBOARD"]
+    assert seen == {"command": "landscape_paste", "clipboard": template}
+    assert clipboard() == original
 
 
 if __name__ == "__main__":

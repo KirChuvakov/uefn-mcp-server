@@ -20,13 +20,30 @@ from tool_tags import experimental
 LANDSCAPE_PROTOCOL = (0, 4, 0)
 
 
-def _ps(script: str, stdin_text: Optional[str] = None) -> str:
+# Windows PowerShell pipes use the console code page, which turns non-ASCII clipboard text into "?" on stdout and
+# garbles it on stdin, so clipboard text travels through UTF-8 files.
+_CLIPBOARD_READ = "Get-Clipboard -Raw"
+_CLIPBOARD_WRITE = "Set-Clipboard -Value $text"
+
+
+def _ps(script: str, clipboard_file: str) -> None:
     """Run a PowerShell snippet in this process's session (outside UEFN)."""
     r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
-                       input=stdin_text, capture_output=True, text=True, encoding="utf-8", timeout=60)
+                       env={**os.environ, "UEFN_CLIPBOARD_FILE": clipboard_file},
+                       capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
     if r.returncode != 0:
         raise RuntimeError(f"PowerShell failed: {r.stderr.strip()[:400]}")
-    return r.stdout
+
+
+def _clipboard_to_file(path: str) -> None:
+    _ps(f"$text = {_CLIPBOARD_READ}; [IO.File]::WriteAllText($env:UEFN_CLIPBOARD_FILE, [string]$text, "
+        "(New-Object Text.UTF8Encoding($false)))", path)
+
+
+def _clipboard_from_file(path: str) -> None:
+    """Put a UTF-8 file's text on the clipboard; an empty file changes nothing."""
+    _ps("$text = [IO.File]::ReadAllText($env:UEFN_CLIPBOARD_FILE, [Text.Encoding]::UTF8); "
+        f"if ($text) {{ {_CLIPBOARD_WRITE} }}", path)
 
 
 def register(mcp, send: Callable[..., dict]) -> None:
@@ -149,15 +166,17 @@ def register(mcp, send: Callable[..., dict]) -> None:
             t3d_path: T3D file from landscape_export_t3d.
             offset: Optional [x, y, z] cm: the pasted actors are moved by it after the paste.
         """
-        with open(t3d_path, "r", encoding="utf-8", errors="replace") as f:
+        with open(t3d_path, "r", encoding="utf-8", errors="replace", newline="") as f:
             text = f.read()
-        saved = _ps("Get-Clipboard -Raw")
-        tmp = os.path.join(tempfile.gettempdir(), "uefn_landscape_paste.t3d")
-        with open(tmp, "w", encoding="utf-8") as f:
-            f.write(text)
-        try:
-            _ps(f"Set-Clipboard -Value ([IO.File]::ReadAllText('{tmp}'))")
-            r = call("landscape_paste", {"offset": list(offset or [])}, timeout=300.0)
-        finally:
-            _ps("$t = [Console]::In.ReadToEnd(); if ($t) { Set-Clipboard -Value $t }", stdin_text=saved)
+        with tempfile.TemporaryDirectory(prefix="uefn_landscape_") as tmp:
+            saved = os.path.join(tmp, "clipboard.txt")
+            t3d = os.path.join(tmp, "paste.t3d")
+            with open(t3d, "w", encoding="utf-8", newline="") as f:
+                f.write(text)
+            _clipboard_to_file(saved)
+            try:
+                _clipboard_from_file(t3d)
+                r = call("landscape_paste", {"offset": list(offset or [])}, timeout=300.0)
+            finally:
+                _clipboard_from_file(saved)
         return json.dumps(r, indent=2)
