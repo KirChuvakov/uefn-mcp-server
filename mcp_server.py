@@ -1914,6 +1914,18 @@ uefn_session.register(mcp)
 
 
 # ---------------------------------------------------------------------------
+# Landscape (listener protocol 0.4.0)
+# ---------------------------------------------------------------------------
+# Read, sculpt by shapes or PNG, set the material, export / paste through T3D.
+# Heights are built here (landscape_heights.py, no dependencies); the listener
+# writes them through a render target. See docs/landscape.md.
+
+import landscape_tools
+
+landscape_tools.register(mcp, _send_command)
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 

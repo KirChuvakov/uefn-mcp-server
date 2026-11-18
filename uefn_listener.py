@@ -32,7 +32,7 @@ import unreal
 # ---------------------------------------------------------------------------
 
 # 0.3.3: rotations take named axes; static-mesh tools use crash-safe reads only (0.5.0 safety fixes).
-PROTOCOL_VERSION = "0.3.3"
+PROTOCOL_VERSION = "0.4.0"
 VERSION_SUFFIX = "by EndoWorlds"
 
 try:
@@ -2490,6 +2490,357 @@ def _cmd_mesh_scatter(
         "skipped_clearance": skipped_clearance,
         "actors": placed,
     }
+
+
+# ---------------------------------------------------------------------------
+# Landscape (0.6.0, untested live: see docs/landscape.md)
+# ---------------------------------------------------------------------------
+# UEFN has no Python call that creates landscape components. These handlers
+# read a landscape, write its heights through a render target, set its
+# material, and move landscape actors in and out through T3D (export to a
+# file; paste from the clipboard, which the MCP server fills from outside
+# UEFN). Heights travel as uint16 (32768 = the landscape actor's Z). Verified
+# on UEFN 2026-11-18: with an RTF_RGBA32F render target and the RG flag OFF the
+# engine puts the raw uint16 height in R (export and import); with the flag ON
+# it packs R = high byte / G = low byte as 0..1 values. The PNG handed over by
+# the MCP server is RG-packed 8-bit; M_LandscapeHeightWriter decodes it to the
+# raw value (R*65280 + G*255) for the float target.
+
+_LANDSCAPE_CLASSES = ("Landscape", "LandscapeStreamingProxy", "LandscapeProxy")
+_LANDSCAPE_TOOLS_DIR = "_LandscapeTools"
+
+
+def _landscape_actors() -> list:
+    out = []
+    for a in unreal.get_editor_subsystem(unreal.EditorActorSubsystem).get_all_level_actors():
+        if a.get_class().get_name() in _LANDSCAPE_CLASSES:
+            out.append(a)
+    return out
+
+
+def _main_landscape(label: str = ""):
+    """The ALandscape actor (the one that owns the edit layers), or the first proxy."""
+    acts = _landscape_actors()
+    if label:
+        acts = [a for a in acts if a.get_actor_label() == label or a.get_name() == label]
+    mains = [a for a in acts if a.get_class().get_name() == "Landscape"]
+    if mains:
+        return mains[0]
+    if acts:
+        return acts[0]
+    raise ValueError("No landscape in the level" + (f" with label {label!r}" if label else ""))
+
+
+def _landscape_grid(landscape) -> dict:
+    """Vertex grid of the whole landscape: origin, scale, quads, vertex counts."""
+    comps = []
+    xs, ys = [], []
+    for a in _landscape_actors():
+        cs = list(a.get_components_by_class(unreal.LandscapeComponent))
+        if not cs:
+            continue
+        comps += cs
+        # LandscapeComponent has no reflected bounds in UEFN: use the owning actor's bounds.
+        o, e = a.get_actor_bounds(False)
+        xs += [o.x - e.x, o.x + e.x]
+        ys += [o.y - e.y, o.y + e.y]
+    if not comps:
+        raise ValueError("The landscape has no LandscapeComponent: it is an empty shell (make one in Landscape Mode)")
+    t = landscape.get_actor_transform()
+    loc, scale = t.translation, t.scale3d
+    try:
+        bases = sorted(set(int(c.get_editor_property("section_base_x")) for c in comps))
+        csq = bases[1] - bases[0] if len(bases) > 1 else 0
+    except Exception:
+        csq = 0
+    quads_x = int(round((max(xs) - min(xs)) / scale.x))
+    quads_y = int(round((max(ys) - min(ys)) / scale.y))
+    return {
+        "origin": [loc.x, loc.y, loc.z],
+        "min_xy": [min(xs), min(ys)],
+        "scale": [scale.x, scale.y, scale.z],
+        "component_size_quads": csq,
+        "components": len(comps),
+        "quads": [quads_x, quads_y],
+        "vertices": [quads_x + 1, quads_y + 1],
+        "cm_per_height_unit": scale.z / 128.0,
+    }
+
+
+@_register("landscape_info")
+def _cmd_landscape_info() -> dict:
+    """Landscape actors, their component counts, the vertex grid and the material."""
+    acts = _landscape_actors()
+    rows = []
+    for a in acts:
+        o, e = a.get_actor_bounds(False)
+        mat = None
+        try:
+            m = a.get_editor_property("landscape_material")
+            mat = m.get_path_name() if m else None
+        except Exception:
+            pass
+        rows.append({
+            "label": a.get_actor_label(), "class": a.get_class().get_name(), "path": a.get_path_name(),
+            "components": len(a.get_components_by_class(unreal.LandscapeComponent)),
+            "bounds_origin": [o.x, o.y, o.z], "bounds_extent": [e.x, e.y, e.z], "material": mat,
+        })
+    grid = None
+    if acts:
+        try:
+            grid = _landscape_grid(_main_landscape())
+        except ValueError as ex:
+            grid = {"error": str(ex)}
+    return {"actors": rows, "grid": grid}
+
+
+def _save_landscape_packages() -> int:
+    pkgs = [a.get_package() for a in _landscape_actors()]
+    unreal.EditorLoadingAndSavingUtils.save_packages(pkgs, False)
+    return len(pkgs)
+
+
+@_register("landscape_set_material")
+def _cmd_landscape_set_material(material_path: str, label: str = "", save: bool = True) -> dict:
+    """Set landscape_material on the landscape (proxies follow unless they override it)."""
+    mat = unreal.EditorAssetLibrary.load_asset(material_path)
+    if mat is None or not isinstance(mat, unreal.MaterialInterface):
+        raise ValueError(f"Not a material: {material_path}")
+    land = _main_landscape(label)
+    land.modify(True)
+    land.set_editor_property("landscape_material", mat)
+    saved = _save_landscape_packages() if save else 0
+    back = land.get_editor_property("landscape_material")
+    return {"landscape": land.get_actor_label(), "material": back.get_path_name() if back else None,
+            "saved_packages": saved}
+
+
+def _height_rt(world, w: int, h: int):
+    return unreal.RenderingLibrary.create_render_target2d(
+        world, w, h, unreal.TextureRenderTargetFormat.RTF_RGBA32F, unreal.LinearColor(32768.0, 0.0, 0.0, 1.0))
+
+
+def _read_heights(world, land, w: int, h: int) -> List[int]:
+    rt = _height_rt(world, w, h)
+    if not land.landscape_export_heightmap_to_render_target(rt, False, True):
+        raise RuntimeError("landscape_export_heightmap_to_render_target returned False")
+    px = unreal.RenderingLibrary.read_render_target_raw(world, rt, False)
+    if px is None or len(px) != w * h:
+        raise RuntimeError(f"Render target read gave {0 if px is None else len(px)} pixels, expected {w * h}")
+    return [max(0, min(65535, int(round(c.r)))) for c in px]
+
+
+@_register("landscape_export_heights")
+def _cmd_landscape_export_heights(label: str = "") -> dict:
+    """Export the whole landscape's heights: uint16 little-endian, row-major, base64."""
+    import base64
+    import struct
+    world = unreal.EditorLevelLibrary.get_editor_world()
+    land = _main_landscape(label)
+    grid = _landscape_grid(land)
+    w, h = grid["vertices"]
+    vals = _read_heights(world, land, w, h)
+    return {"grid": grid, "width": w, "height": h, "min": min(vals), "max": max(vals),
+            "data_b64": base64.b64encode(struct.pack(f"<{len(vals)}H", *vals)).decode()}
+
+
+def _height_writer_material(texture):
+    """M_LandscapeHeightWriter: unlit, emissive R = raw height decoded from the RG texture (R*65280 + G*255)."""
+    root = _project_mount() + "/" + _LANDSCAPE_TOOLS_DIR
+    path = root + "/M_LandscapeHeightWriter"
+    if unreal.EditorAssetLibrary.does_asset_exist(path):
+        return unreal.EditorAssetLibrary.load_asset(path)
+    at = unreal.AssetToolsHelpers.get_asset_tools()
+    mat = at.create_asset("M_LandscapeHeightWriter", root, unreal.Material, unreal.MaterialFactoryNew())
+    mat.set_editor_property("shading_model", unreal.MaterialShadingModel.MSM_UNLIT)
+    mel = unreal.MaterialEditingLibrary
+    ts = mel.create_material_expression(mat, unreal.MaterialExpressionTextureSample, -400, 0)
+    ts.set_editor_property("texture", texture)
+    ts.set_editor_property("sampler_type", unreal.MaterialSamplerType.SAMPLERTYPE_LINEAR_COLOR)
+    k = mel.create_material_expression(mat, unreal.MaterialExpressionConstant3Vector, -400, 250)
+    k.set_editor_property("constant", unreal.LinearColor(65280.0, 255.0, 0.0, 0.0))
+    dot = mel.create_material_expression(mat, unreal.MaterialExpressionDotProduct, -150, 100)
+    mel.connect_material_expressions(ts, "RGB", dot, "A")
+    mel.connect_material_expressions(k, "", dot, "B")
+    mel.connect_material_property(dot, "", unreal.MaterialProperty.MP_EMISSIVE_COLOR)
+    mel.recompile_material(mat)
+    unreal.EditorAssetLibrary.save_asset(path)
+    return mat
+
+
+def _project_mount() -> str:
+    """'/<plugin mount>' of the open level, e.g. '/4a04015e-...' or '/MyIsland'."""
+    world = unreal.EditorLevelLibrary.get_editor_world()
+    return "/" + world.get_path_name().strip("/").split("/")[0]
+
+
+@_register("landscape_import_heights")
+def _cmd_landscape_import_heights(png_path: str, label: str = "", edit_layer_index: int = 0, save: bool = True) -> dict:
+    """Write heights from an RG-packed 8-bit RGB PNG (R = high byte, G = low byte) sized to the vertex grid.
+
+    PNG -> texture (uncompressed, linear, nearest, no mips) -> unlit material drawn to an RGBA8 render
+    target -> landscape_import_heightmap_from_render_target. Reads the heights back and reports the
+    mismatch against the PNG's own min / max, so a wrong packing shows at once.
+    """
+    if not os.path.isfile(png_path):
+        raise ValueError(f"PNG not found: {png_path}")
+    world = unreal.EditorLevelLibrary.get_editor_world()
+    land = _main_landscape(label)
+    grid = _landscape_grid(land)
+    w, h = grid["vertices"]
+
+    root = _project_mount() + "/" + _LANDSCAPE_TOOLS_DIR
+    task = unreal.AssetImportTask()
+    task.filename = png_path
+    task.destination_path = root
+    task.destination_name = "T_LandscapeHeights"
+    task.automated = True
+    task.save = False
+    task.replace_existing = True
+    unreal.AssetToolsHelpers.get_asset_tools().import_asset_tasks([task])
+    tex = unreal.EditorAssetLibrary.load_asset(root + "/T_LandscapeHeights")
+    if tex is None:
+        raise RuntimeError("PNG import gave no texture")
+    tex.set_editor_property("power_of_two_mode", unreal.TexturePowerOfTwoSetting.NONE)
+    tex.set_editor_property("compression_settings", unreal.TextureCompressionSettings.TC_VECTOR_DISPLACEMENTMAP)
+    tex.set_editor_property("srgb", False)
+    tex.set_editor_property("filter", unreal.TextureFilter.TF_NEAREST)
+    tex.set_editor_property("mip_gen_settings", unreal.TextureMipGenSettings.TMGS_NO_MIPMAPS)
+    tex.set_editor_property("never_stream", True)
+    unreal.EditorAssetLibrary.save_asset(root + "/T_LandscapeHeights", False)
+    tw, th = tex.blueprint_get_size_x(), tex.blueprint_get_size_y()
+    if (tw, th) != (w, h):
+        raise ValueError(f"PNG is {tw}x{th}, the landscape needs {w}x{h} vertices")
+
+    mat = _height_writer_material(tex)
+    rt = _height_rt(world, w, h)
+    unreal.RenderingLibrary.draw_material_to_render_target(world, rt, mat)
+    land.modify(True)
+    ok = land.landscape_import_heightmap_from_render_target(rt, False, edit_layer_index)
+    if not ok:
+        raise RuntimeError("landscape_import_heightmap_from_render_target returned False")
+    saved = _save_landscape_packages() if save else 0
+
+    vals = _read_heights(world, land, w, h)
+    return {"grid": grid, "imported": True, "saved_packages": saved,
+            "readback_min": min(vals) if vals else None, "readback_max": max(vals) if vals else None}
+
+
+def _weight_writer_material(texture):
+    """M_LandscapeWeightWriter: unlit, emissive = the grayscale weights texture (0..1)."""
+    root = _project_mount() + "/" + _LANDSCAPE_TOOLS_DIR
+    path = root + "/M_LandscapeWeightWriter"
+    if unreal.EditorAssetLibrary.does_asset_exist(path):
+        return unreal.EditorAssetLibrary.load_asset(path)
+    at = unreal.AssetToolsHelpers.get_asset_tools()
+    mat = at.create_asset("M_LandscapeWeightWriter", root, unreal.Material, unreal.MaterialFactoryNew())
+    mat.set_editor_property("shading_model", unreal.MaterialShadingModel.MSM_UNLIT)
+    mel = unreal.MaterialEditingLibrary
+    ts = mel.create_material_expression(mat, unreal.MaterialExpressionTextureSample, -400, 0)
+    ts.set_editor_property("texture", texture)
+    ts.set_editor_property("sampler_type", unreal.MaterialSamplerType.SAMPLERTYPE_LINEAR_COLOR)
+    mel.connect_material_property(ts, "R", unreal.MaterialProperty.MP_EMISSIVE_COLOR)
+    mel.recompile_material(mat)
+    unreal.EditorAssetLibrary.save_asset(path)
+    return mat
+
+
+@_register("landscape_import_weights")
+def _cmd_landscape_import_weights(layers: Dict[str, str], label: str = "", edit_layer_index: int = 0,
+                                  save: bool = True) -> dict:
+    """Write paint-layer weights: {layer name: path of an 8-bit grayscale PNG sized to the vertex grid}.
+
+    Every PNG goes PNG -> texture (uncompressed, linear, nearest, no mips) -> unlit material -> RGBA32F
+    render target -> landscape_import_weightmap_from_render_target. The layers need LayerInfo assets
+    (Landscape Mode > Paint > Target Layers); a layer without one makes the engine return False.
+    """
+    world = unreal.EditorLevelLibrary.get_editor_world()
+    land = _main_landscape(label)
+    grid = _landscape_grid(land)
+    w, h = grid["vertices"]
+    known = [str(n) for n in land.get_target_layer_names()]
+    root = _project_mount() + "/" + _LANDSCAPE_TOOLS_DIR
+    results = {}
+    land.modify(True)
+    for layer, png in layers.items():
+        if layer not in known:
+            results[layer] = f"no LayerInfo for this layer (known: {known})"
+            continue
+        task = unreal.AssetImportTask()
+        task.filename = png
+        task.destination_path = root
+        task.destination_name = "T_LandscapeWeights"
+        task.automated = True
+        task.save = False
+        task.replace_existing = True
+        unreal.AssetToolsHelpers.get_asset_tools().import_asset_tasks([task])
+        tex = unreal.EditorAssetLibrary.load_asset(root + "/T_LandscapeWeights")
+        tex.set_editor_property("power_of_two_mode", unreal.TexturePowerOfTwoSetting.NONE)
+        tex.set_editor_property("compression_settings", unreal.TextureCompressionSettings.TC_VECTOR_DISPLACEMENTMAP)
+        tex.set_editor_property("srgb", False)
+        tex.set_editor_property("filter", unreal.TextureFilter.TF_NEAREST)
+        tex.set_editor_property("mip_gen_settings", unreal.TextureMipGenSettings.TMGS_NO_MIPMAPS)
+        tex.set_editor_property("never_stream", True)
+        unreal.EditorAssetLibrary.save_asset(root + "/T_LandscapeWeights", False)
+        if (tex.blueprint_get_size_x(), tex.blueprint_get_size_y()) != (w, h):
+            results[layer] = f"PNG must be {w}x{h}"
+            continue
+        mat = _weight_writer_material(tex)
+        rt = unreal.RenderingLibrary.create_render_target2d(
+            world, w, h, unreal.TextureRenderTargetFormat.RTF_RGBA32F, unreal.LinearColor(0, 0, 0, 1))
+        unreal.RenderingLibrary.draw_material_to_render_target(world, rt, mat)
+        results[layer] = bool(land.landscape_import_weightmap_from_render_target(rt, unreal.Name(layer), edit_layer_index))
+    saved = _save_landscape_packages() if save else 0
+    return {"layers": results, "saved_packages": saved}
+
+
+@_register("landscape_export_t3d")
+def _cmd_landscape_export_t3d(out_path: str, labels: List[str] = None) -> dict:
+    """Export landscape actors (all, or the given labels) to a T3D file with LevelExporterT3D (selected only)."""
+    sub = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
+    acts = _landscape_actors()
+    if labels:
+        acts = [a for a in acts if a.get_actor_label() in labels]
+    if not acts:
+        raise ValueError("No landscape actors to export")
+    prev = sub.get_selected_level_actors()
+    try:
+        sub.set_selected_level_actors(acts)
+        t = unreal.AssetExportTask()
+        t.object = unreal.EditorLevelLibrary.get_editor_world()
+        t.exporter = unreal.LevelExporterT3D()
+        t.filename = out_path
+        t.selected = True
+        t.automated = True
+        t.prompt = False
+        t.replace_identical = True
+        ok = unreal.Exporter.run_asset_export_task(t)
+    finally:
+        sub.set_selected_level_actors(prev)
+    size = os.path.getsize(out_path) if os.path.isfile(out_path) else 0
+    return {"ok": bool(ok), "actors": [a.get_actor_label() for a in acts], "path": out_path, "bytes": size}
+
+
+@_register("landscape_paste")
+def _cmd_landscape_paste(offset: List[float] = None) -> dict:
+    """EDIT PASTE (with the world context) of the clipboard the MCP server filled; move the new actors by
+    `offset` (cm) and report them."""
+    sub = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
+    before = set(a.get_path_name() for a in sub.get_all_level_actors())
+    world = unreal.EditorLevelLibrary.get_editor_world()
+    unreal.SystemLibrary.execute_console_command(world, "EDIT PASTE")
+    new = [a for a in sub.get_all_level_actors() if a.get_path_name() not in before]
+    if offset:
+        dx, dy, dz = _float_list(offset, 3, "offset")
+        for a in new:
+            if a.get_attach_parent_actor() is None:
+                a.modify(True)
+                l = a.get_actor_location()
+                a.set_actor_location(unreal.Vector(l.x + dx, l.y + dy, l.z + dz), False, True)
+    return {"new_actors": [{"label": a.get_actor_label(), "class": a.get_class().get_name(),
+                            "path": a.get_path_name(),
+                            "components": len(a.get_components_by_class(unreal.LandscapeComponent))}
+                           for a in new]}
 
 
 # ---------------------------------------------------------------------------

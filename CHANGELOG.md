@@ -11,6 +11,19 @@ Release versions of the repo. The listener also reports a protocol version in `p
   did not start. `setup.ps1` (and `pip install -r requirements.txt`) now installs a 1.x SDK, and moves a PC that
   already got 2.x back to 1.x.
 
+## 0.6.0 — unreleased (not tested on a live editor yet)
+
+116 MCP tools. Listener protocol 0.4.0 (was 0.3.3): new landscape commands; the landscape tools refuse an older listener.
+
+### Added — landscape (`landscape_tools.py`, `landscape_heights.py`, 6 tools)
+- `landscape_info`, `landscape_set_material`, `landscape_export_heights` (16-bit PNG on the host).
+- `landscape_set_heights` [experimental]: shapes (flat, plateau, rect, hill, ring, noise) or a heightmap PNG,
+  written through an RGBA8 render target.
+- `landscape_export_t3d` and `landscape_paste_t3d` [experimental]: a landscape template out to a T3D file and
+  back in with `EDIT PASTE`, the clipboard filled from outside UEFN and restored.
+- `docs/landscape.md`: how it works and the live checks still to run. Offline tests:
+  `tests/test_landscape_heights_offline.py`.
+
 ## 0.5.0 — 2026-10-02
 
 110 MCP tools (3 new UEFN session tools, host-side: they run in the MCP server process and need no listener).

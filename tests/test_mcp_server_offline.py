@@ -18,8 +18,8 @@ import sys
 import threading
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-# 107 in 0.4.0 + 3 uefn_* session tools (0.5.0).
-MIN_TOOLS = 110
+# 107 in 0.4.0 + 3 uefn_* session tools (0.5.0) + 6 landscape tools (0.6.0).
+MIN_TOOLS = 117
 SESSION_TOOLS = {"uefn_status", "uefn_launch_project", "uefn_set_load_on_startup"}
 # One tool per group (all of the new groups), so a module that fails to register is caught by name.
 EXPECTED = {
@@ -29,10 +29,13 @@ EXPECTED = {
     "device_set_editable", "playtest_start", "mesh_scatter", "verse_list_services",
     "verse_compile", "verse_status", "verse_push",
     "verse_symbols", "verse_hover", "verse_definition", "verse_find_symbol", "verse_lsp_restart",
+    "landscape_info", "landscape_set_heights", "landscape_paste_t3d",
 } | SESSION_TOOLS
 # Tools that need the user's confirmation: "[experimental]" title, destructiveHint, note first in the description.
 EXPERIMENTAL_TOOLS = {"execute_python", "delete_asset", "asset_batch_rename", "shutdown", "verse_push",
-                      "uefn_launch_project", "uefn_set_load_on_startup"}
+                      "uefn_launch_project", "uefn_set_load_on_startup",
+                      "landscape_set_heights", "landscape_paste_t3d",
+                      "landscape_set_weights"}
 EXPERIMENTAL_NOTE = "[experimental] Ask the user to confirm before each call."
 # Tools whose rotation parameter must be published as named axes (0.5.0 rotation fix).
 ROTATION_PARAMS = {"spawn_actor": "rotation", "set_actor_transform": "rotation", "set_viewport_camera": "rotation",
