@@ -9,12 +9,21 @@ Claude Code  <--stdio-->  MCP Server (mcp_server.py)  <--HTTP 127.0.0.1:8765--> 
                                    '--files / Win32 ---->  editor log, settings ini, processes   (uefn_status / uefn_launch_project / ...)
 ```
 
-- **110 tools**: actors, assets, levels, viewport, materials, Niagara, animations, static meshes, data tables, asset validation, device `@editable` wiring, Play-In-Editor control, StaticMeshActor scatter, Verse source introspection, Verse compile/push, Verse code navigation, UEFN session status / launch, and arbitrary Python execution
+- **117 tools**: actors, assets, levels, viewport, landscapes (heights, paint layers, material, T3D), materials, Niagara, animations, static meshes, data tables, asset validation, device `@editable` wiring, Play-In-Editor control, StaticMeshActor scatter, Verse source introspection, Verse compile/push, Verse code navigation, UEFN session status / launch, and arbitrary Python execution
 - **Zero C++ compilation** — pure Python, works across UEFN versions
 - **Main-thread safe** — all `unreal.*` calls dispatched via editor tick callback
 - **Autostart** — the listener starts by itself when a project opens (see [Auto-start](#auto-start))
 - **Crash recovery** — the UEFN session tools read the editor state and relaunch UEFN after a crash; see [UEFN session and crash recovery](#uefn-session-and-crash-recovery)
 - **No input simulation** — the server never sends mouse or keyboard input; tools that are hard to undo are tagged [experimental](#experimental-tools)
+
+## What's new in 0.6.0
+
+- **Landscape** (`landscape_tools.py` + `landscape_heights.py`, 7 tools, listener protocol 0.4.0): `landscape_info`,
+  `landscape_export_heights`, `landscape_set_heights` (shapes: flat, plateau, rect, hill, ring, noise, ridged
+  mountain; or a heightmap PNG), `landscape_set_weights` (paint layers from grayscale PNGs), `landscape_set_material`,
+  `landscape_export_t3d` / `landscape_paste_t3d`. UEFN has no Python call that creates landscape components: make the
+  landscape in Landscape Mode once, then sculpt and paint it from here. Verified live on a World Partition landscape;
+  see [docs/landscape.md](docs/landscape.md) and the paint example `examples/landscape_paint_apollo.py`.
 
 ## What's new in 0.5.0
 

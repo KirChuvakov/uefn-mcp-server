@@ -70,6 +70,12 @@ Both conventions are covered offline by `tests/test_rotation_offline.py` and `te
 
 ---
 
+## Landscape (0.6.0)
+
+Seven tools, documented with the formats, the verified behaviour and the limits in [landscape.md](landscape.md):
+`landscape_info`, `landscape_export_heights`, `landscape_set_heights` [experimental], `landscape_set_weights`
+[experimental], `landscape_set_material`, `landscape_export_t3d`, `landscape_paste_t3d` [experimental].
+
 ## System
 
 ### `ping`
