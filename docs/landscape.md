@@ -75,8 +75,9 @@ Noise node), chained with Lerps into Base Color. Every colour and threshold is a
 `landscape_set_weights` -> listener `landscape_import_weights`: one 8-bit grayscale PNG per layer -> texture ->
 `M_LandscapeWeightWriter` (emissive = R) -> RTF_RGBA32F -> `landscape_import_weightmap_from_render_target`. Returned
 True for all six layers and changed the look. `render_weightmap` (runtime) returns False in the editor: no
-weight read-back yet. Creative Apollo layers as seen on renders: Layer1 dry dirt, Layer2 brown earth, Layer3 pale
-sand (lightest, usable as snow), Layer4 dark mud, Layer5 grass, Layer6 gravel. The Apollo material puts rock on
+weight read-back yet. Creative Apollo layers as the owner named them (distant renders misled: name layers from close shots and confirm):
+no paint = grass (the base), Layer1 half sand / half earth, Layer2 earth, Layer3 sand, Layer4 asphalt, Layer5
+forest floor (needles, cones), Layer6 pebbles. Partial weights blend over the grass base. The Apollo material puts rock on
 steep slopes by itself, whatever is painted, and no MI parameter tried changed that: keep slopes under ~35 degrees
 where grass should show. The weights used (by height, slope, value noise, a path ring) are in the project's
 `RetroTycoon_Scripts/landscape_paint_v3.py`.
