@@ -60,3 +60,12 @@ Landscape Mode starts with every target layer unassigned (`target_layers` shows 
 unreadable through unreal-mcp ObjectToolset, so the assignment is one manual step in Landscape Mode > Paint > Target
 Layers (pick the existing LayerN_LayerInfo per layer). After it, a weights tool can write through
 `landscape_import_weightmap_from_render_target`. The material also blends rock onto steep slopes by itself.
+
+### The other route: colour from height and slope (verified 2026-11-18)
+
+A landscape material that computes its colour itself needs no paint layers at all. Built from Python in the project
+(`/<mount>/Landscape/M_RetroLandscape` + `MI_RetroLandscape`) and applied with `landscape_set_material`:
+WorldPosition Z and VertexNormalWS Z drive four masks (snow above `SnowStartCm`, rock on slopes steeper than
+`RockSlopeStart` above `RockMinHeightCm`, a lighter ridge colour with height, two grass colours mixed by a world
+Noise node), chained with Lerps into Base Color. Every colour and threshold is an MI parameter. No Custom node
+(validation rejects it). It drops the Creative material's grass meshes and textures: a stylised, painted look.
