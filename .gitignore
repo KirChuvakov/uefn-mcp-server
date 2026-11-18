@@ -15,3 +15,10 @@ vendor/
 
 # ensure_mcp_hook.ps1 run log
 *.log
+
+# Local agent settings
+.claude
+
+# Generated from a UEFN project: tools/generate_uefn_stub.py, tools/generate_api_docs.py
+docs/uefn_stub.pyi
+docs/generated/
