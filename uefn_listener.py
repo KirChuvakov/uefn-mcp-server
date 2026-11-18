@@ -634,29 +634,51 @@ def _cmd_focus_selected() -> dict:
 
 @_register("get_editor_log")
 def _cmd_get_editor_log(last_n: int = 100, filter_str: str = "") -> dict:
-    """Read recent lines from the UE Output Log file."""
-    log_path = unreal.Paths.project_log_dir()
+    """Read recent lines from the UE Output Log file.
+
+    The log directory holds several .log files written concurrently
+    (UnrealRevisionControl.log, cef3.log, the editor log, plus rotated
+    *-backup-* copies). Selecting the newest by mtime is wrong: the
+    revision-control / transport log is rewritten every few seconds and almost
+    always wins, returning auth spam instead of the editor output.
+
+    Instead, identify the editor log by name: it is the log whose filename
+    starts with the running application's prefix (e.g.
+    UnrealEditorFortnite.log, from sys.executable), excluding rotated backups.
+    If nothing matches the prefix we return an explicit error rather than
+    falling back to the newest log — guessing the newest unidentified file is
+    exactly the original bug, so this function returns the editor log or
+    nothing, never the wrong file.
+    """
+    log_dir = str(unreal.Paths.project_log_dir())
     log_file = None
+    error = None
     try:
         import os
-        log_dir = str(log_path)
-        # Find the most recent .log file
-        log_files = [f for f in os.listdir(log_dir) if f.endswith(".log")]
-        if log_files:
-            log_files.sort(key=lambda f: os.path.getmtime(os.path.join(log_dir, f)), reverse=True)
-            log_file = os.path.join(log_dir, log_files[0])
-    except Exception:
-        pass
+        # "UnrealEditorFortnite-Win64-Shipping" -> "UnrealEditorFortnite"
+        app_prefix = os.path.splitext(os.path.basename(sys.executable))[0].split("-")[0]
+        matching = [
+            f for f in os.listdir(log_dir)
+            if f.lower().endswith(".log") and "-backup-" not in f and f.startswith(app_prefix)
+        ]
+        if matching:
+            matching.sort(key=lambda f: os.path.getmtime(os.path.join(log_dir, f)), reverse=True)
+            log_file = os.path.join(log_dir, matching[0])
+        else:
+            error = f"No editor log matching prefix '{app_prefix}' in {log_dir}"
+    except Exception as e:
+        error = str(e)
 
     if not log_file:
-        return {"lines": [], "error": "Log file not found"}
+        return {"lines": [], "error": error or "Log file not found"}
 
     try:
         with open(log_file, "r", encoding="utf-8", errors="replace") as f:
             all_lines = f.readlines()
-        lines = all_lines[-last_n:]
+        # Filter before tailing so last_n counts matching lines, not raw lines.
         if filter_str:
-            lines = [l for l in lines if filter_str.lower() in l.lower()]
+            all_lines = [l for l in all_lines if filter_str.lower() in l.lower()]
+        lines = all_lines[-last_n:]
         return {"lines": [l.rstrip() for l in lines], "count": len(lines), "file": log_file}
     except Exception as e:
         return {"lines": [], "error": str(e)}
