@@ -89,6 +89,8 @@ def register(mcp, send: Callable[..., dict]) -> None:
           {"type": "hill", "x", "y", "radius", "height_m"}                 added bump; negative = dip
           {"type": "ring", "x", "y", "inner", "outer", "height_m"}         added ridge between two radii
           {"type": "noise", "amplitude_m", "cell", "seed", "keep_inside": {"x", "y", "radius"}}
+          {"type": "mountain", "x", "y", "radius", "height_m", "sharpness", "ridges", "ridge_depth", "phase"}
+              ridged cone merged with max(); a row of them makes a mountain range
 
         Args:
             shapes: Shape list (ignored when heights_png is given).

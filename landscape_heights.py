@@ -68,6 +68,10 @@ def build_heights(grid: dict, shapes: Sequence[dict], base_m: float = 0.0) -> Li
           added bump between r0 and r1 (hills around a base); smooth on both edges
       {"type": "noise", "amplitude_m": a, "cell": c, "seed": s, "keep_inside": {"x":, "y":, "radius":}}
           added value noise; optional circle left untouched (with a soft edge of `cell` cm)
+      {"type": "mountain", "x": cx, "y": cy, "radius": r, "height_m": h, "sharpness": 1.6,
+       "ridges": 16, "ridge_depth": 0.3, "phase": 0.0}
+          a cone with concave slopes and a rounded top, its flanks cut by `ridges` radial gullies
+          (deeper towards the foot); merged with max(), so neighbours overlap into a range
     """
     w, h = grid["vertices"]
     sx, sy, sz = grid["scale"]
@@ -116,6 +120,21 @@ def build_heights(grid: dict, shapes: Sequence[dict], base_m: float = 0.0) -> Li
                         d = math.hypot(x - keep["x"], y - keep["y"])
                         a *= _smoothstep(keep["radius"], keep["radius"] + float(op.get("cell", 2000.0)), d)
                     field[k] = cur + a
+                elif kind == "mountain":
+                    dx, dy = x - op["x"], y - op["y"]
+                    d = math.hypot(dx, dy) / float(op["radius"])
+                    if d < 1.0:
+                        sh = float(op.get("sharpness", 1.6))
+                        prof = (1.0 - d) ** sh
+                        if d < 0.12:  # round the summit
+                            top = (1.0 - 0.12) ** sh
+                            prof = top + (1.0 - top) * (0.5 + 0.5 * math.cos(math.pi * d / 0.12)) * 0.6
+                        n = int(op.get("ridges", 16))
+                        if n > 0:
+                            th = math.atan2(dy, dx) * n + float(op.get("phase", 0.0))
+                            gully = 0.5 * (1.0 - math.cos(th))
+                            prof *= 1.0 - float(op.get("ridge_depth", 0.3)) * d * gully
+                        field[k] = max(cur, float(op["height_m"]) * prof)
                 else:
                     raise ValueError(f"Unknown shape type: {kind!r}")
     return [max(0, min(65535, int(round(ZERO + m * unit)))) for m in field]

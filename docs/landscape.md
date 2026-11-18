@@ -49,3 +49,14 @@ Items 1-3 below passed on 2026-11-18; 4 and 5 are open.
    a new landscape with components and the same heights, or a refusal. Record what UEFN does with the
    landscape GUID and edit layers. If the paste works, this is how a new landscape is made without Landscape
    Mode; if not, Landscape Mode stays the only route and the paste tool should be removed.
+
+## Paint layers: blocked by unassigned layer infos (2026-11-18)
+
+The Creative Apollo landscape material has target layers Layer1..Layer7 and ready LayerInfo assets in
+`/Game/Creative/Materials/Landscape/Creative_Landscape_Apollo/LayerInfo/LayerN_LayerInfo`, but a landscape made in
+Landscape Mode starts with every target layer unassigned (`target_layers` shows `{}` values,
+`get_target_layer_names()` returns only the visibility layer). Then `render_weightmap` and
+`landscape_import_weightmap_from_render_target` fail for every layer. `target_layers` is read-only from Python and
+unreadable through unreal-mcp ObjectToolset, so the assignment is one manual step in Landscape Mode > Paint > Target
+Layers (pick the existing LayerN_LayerInfo per layer). After it, a weights tool can write through
+`landscape_import_weightmap_from_render_target`. The material also blends rock onto steep slopes by itself.
